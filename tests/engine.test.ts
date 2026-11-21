@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CARDS } from '../src/engine/content';
+import { CARDS, MOVES } from '../src/engine/content';
 import {
   allReady, card, energyLeft, hero, liveEnemies, newGame, pickReward, planCard, planMove, resolveRound, rnd,
   setReady, validTargets,
@@ -19,6 +19,7 @@ function exampleRound() {
   orc!.intent = { move: 'smash', target: 'blade' };
   shaman!.hp = 9;
   shaman!.intent = { move: 'heal', target: orc!.uid };
+  archer!.hp = 10;
   archer!.intent = { move: 'shot', target: 'mystic' };
   hero(s, 'guard').hp = 38;
   hero(s, 'blade').hp = 22;
@@ -57,7 +58,7 @@ describe('пример раунда', () => {
     expect(e(orc.uid).hp).toBe(0);
     expect(e(shaman.uid).hp).toBe(4);
     expect(e(archer.uid).hp).toBe(6);
-    expect(hero(state, 'mystic').hp).toBe(24);
+    expect(hero(state, 'mystic').hp).toBe(30 - MOVES.shot!.dmg!);
     expect(hero(state, 'blade').hp).toBe(22);
     expect(text).toMatch(/6-я атака ×2/);
     expect(text).toMatch(/🎯 ×2/);

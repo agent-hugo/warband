@@ -110,32 +110,32 @@ export const HEROES: Record<HeroId, HeroDef> = {
 export const HERO_ORDER: HeroId[] = ['guard', 'blade', 'mystic'];
 
 export const MOVES: Record<string, MoveDef> = {
-  hit: { name: 'Удар', speed: 1, range: 'melee', dmg: 8 },
-  smash: { name: 'Сокрушить', speed: 2, range: 'melee', dmg: 14 },
+  hit: { name: 'Удар', speed: 1, range: 'melee', dmg: 10 },
+  smash: { name: 'Сокрушить', speed: 2, range: 'melee', dmg: 18 },
   rage: { name: 'Ярость', speed: 0, range: 'self', str: 4 },
-  slash: { name: 'Рубящий удар', speed: 1, range: 'melee', dmg: 7 },
-  stab: { name: 'Укол', speed: 0, range: 'melee', dmg: 4 },
-  bite: { name: 'Укус', speed: 0, range: 'melee', dmg: 5 },
-  maul: { name: 'Трёпка', speed: 1, range: 'melee', dmg: 7 },
-  shot: { name: 'Выстрел', speed: 0, range: 'ranged', dmg: 6, preferRear: true },
-  volley: { name: 'Залп', speed: 1, range: 'ranged', dmg: 4, all: true },
-  heal: { name: 'Лечение', speed: 1, range: 'ally', heal: 8 },
-  hex: { name: 'Порча', speed: 1, range: 'ranged', dmg: 5 },
-  sweep: { name: 'Размах', speed: 1, range: 'melee', dmg: 7, all: true },
-  slam: { name: 'Сокрушающий удар', speed: 2, range: 'melee', dmg: 18 },
-  regen: { name: 'Регенерация', speed: 0, range: 'self', heal: 6, block: 8 },
+  slash: { name: 'Рубящий удар', speed: 1, range: 'melee', dmg: 9 },
+  stab: { name: 'Укол', speed: 0, range: 'melee', dmg: 5 },
+  bite: { name: 'Укус', speed: 0, range: 'melee', dmg: 7 },
+  maul: { name: 'Трёпка', speed: 1, range: 'melee', dmg: 10 },
+  shot: { name: 'Выстрел', speed: 0, range: 'ranged', dmg: 8, preferRear: true },
+  volley: { name: 'Залп', speed: 1, range: 'ranged', dmg: 5, all: true },
+  heal: { name: 'Лечение', speed: 1, range: 'ally', heal: 10 },
+  hex: { name: 'Порча', speed: 1, range: 'ranged', dmg: 7 },
+  sweep: { name: 'Размах', speed: 1, range: 'melee', dmg: 9, all: true },
+  slam: { name: 'Сокрушающий удар', speed: 2, range: 'melee', dmg: 22 },
+  regen: { name: 'Регенерация', speed: 0, range: 'self', heal: 10, block: 8 },
   // особые: вычисляются из обстановки
   advance: { name: 'Наступает', speed: 1, range: 'self' },
-  leap: { name: 'Отскок', speed: 0, range: 'ranged', dmg: 4 },
+  leap: { name: 'Отскок', speed: 0, range: 'ranged', dmg: 5 },
 };
 
 export const ENEMIES: Record<string, EnemyKind> = {
-  brute: { name: 'Орк-громила', icon: '🪓', hp: 30, pos: 2, pattern: ['hit', 'smash', 'rage'] },
-  cutter: { name: 'Гоблин-рубака', icon: '🔪', hp: 14, pos: 2, pattern: ['slash', 'stab'] },
-  archer: { name: 'Гоблин-лучник', icon: '🏹', hp: 10, pos: 3, pattern: ['shot', 'volley'], leaps: true },
-  shaman: { name: 'Гоблин-шаман', icon: '🪄', hp: 12, pos: 3, pattern: ['heal', 'hex'] },
-  wolf: { name: 'Волк', icon: '🐺', hp: 12, pos: 2, pattern: ['bite', 'maul'] },
-  troll: { name: 'Тролль-вожак', icon: '👹', hp: 80, pos: 2, pattern: ['sweep', 'slam', 'regen'] },
+  brute: { name: 'Орк-громила', icon: '🪓', hp: 55, pos: 2, pattern: ['hit', 'smash', 'rage'] },
+  cutter: { name: 'Гоблин-рубака', icon: '🔪', hp: 36, pos: 2, pattern: ['slash', 'stab'] },
+  archer: { name: 'Гоблин-лучник', icon: '🏹', hp: 24, pos: 3, pattern: ['shot', 'volley'], leaps: true },
+  shaman: { name: 'Гоблин-шаман', icon: '🪄', hp: 24, pos: 3, pattern: ['heal', 'hex'] },
+  wolf: { name: 'Волк', icon: '🐺', hp: 30, pos: 2, pattern: ['bite', 'maul'] },
+  troll: { name: 'Тролль-вожак', icon: '👹', hp: 120, pos: 2, pattern: ['sweep', 'slam', 'regen'] },
 };
 
 export const ENCOUNTERS: Encounter[] = [
