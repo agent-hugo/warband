@@ -387,6 +387,10 @@ function Rewards(p: {
   s: GameState; canControl: (id: HeroId) => boolean; seatNote?: (id: HeroId) => ComponentChildren; err: string;
   onPick: (id: HeroId, c: string | null) => void;
 }) {
+  /** The choice waiting for confirmation: a card id, or null for skipping. */
+  const [pending, setPending] = useState<{ hero: HeroId; card: string | null } | null>(null);
+  const ph = pending && p.s.heroes.find((h) => h.id === pending.hero);
+  const stillOpen = !!ph && !!p.s.offers[ph.id] && p.canControl(ph.id);
   return (
     <div class="panel">
       <h3>Награда: каждый герой берёт одну карту в колоду (или пропускает)</h3>
@@ -403,14 +407,55 @@ function Rewards(p: {
             {offer && p.canControl(h.id) && (
               <div class="hand">
                 {offer.map((id) => (
-                  <CardView def={CARDS[id]!} onClick={() => p.onPick(h.id, id)} />
+                  <CardView def={CARDS[id]!} onClick={() => setPending({ hero: h.id, card: id })} />
                 ))}
-                <button class="skip" onClick={() => p.onPick(h.id, null)}>Пропустить</button>
+                <button class="skip" onClick={() => setPending({ hero: h.id, card: null })}>Пропустить</button>
               </div>
             )}
           </div>
         );
       })}
+      {pending && ph && stillOpen && (
+        <DeckConfirm
+          h={ph}
+          card={pending.card}
+          onCancel={() => setPending(null)}
+          onOk={() => {
+            p.onPick(ph.id, pending.card);
+            setPending(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The hero's deck with the new card on top, to confirm a reward choice. */
+function DeckConfirm(p: { h: Hero; card: string | null; onOk: () => void; onCancel: () => void }) {
+  const { h, card } = p;
+  const counts = new Map<string, number>();
+  for (const c of h.owned) counts.set(c.id, (counts.get(c.id) ?? 0) + 1);
+  const total = h.owned.length + (card ? 1 : 0);
+  return (
+    <div class="modal-bg" onClick={p.onCancel}>
+      <div class="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>
+          {h.icon} {h.name}: {card ? <>взять «{CARDS[card]!.name}»?</> : 'пропустить награду?'}
+        </h3>
+        <div class="muted small">
+          {card ? `Карта останется в колоде до конца похода. В колоде станет ${total} карт:` : `Колода останется прежней, ${total} карт:`}
+        </div>
+        <div class="hand deck">
+          {card && <CardView def={CARDS[card]!} on hint="новая" />}
+          {[...counts].map(([id, n]) => (
+            <CardView def={CARDS[id]!} hint={n > 1 ? `×${n}` : undefined} />
+          ))}
+        </div>
+        <div class="row right modal-btns">
+          <button onClick={p.onCancel}>Отмена</button>
+          <button class="primary" onClick={p.onOk}>{card ? 'Взять в колоду' : 'Пропустить'}</button>
+        </div>
+      </div>
     </div>
   );
 }
