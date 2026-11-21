@@ -17,18 +17,25 @@ import {
   type RoomState,
 } from '../net/protocol';
 import { GameView, Help, type Playback } from './GameView';
+import { decodeInvite, inviteHash } from './invite';
 import { settings } from './storage';
 
 const STEP_MS = 700;
 
 type Route = { page: 'home' } | { page: 'local' } | { page: 'room'; code: string } | { page: 'host'; code: string };
 
-/** Reads the hash; a token in it (`t=`) is saved and removed from the address. */
+/**
+ * Reads the hash. An invite (`i=<base64url>` with room and token, or a plain
+ * `t=`) saves the token and is replaced by a plain `r=` in the address.
+ */
 function parseRoute(): Route {
   const h = new URLSearchParams(location.hash.slice(1));
-  const t = h.get('t');
-  if (t) {
-    settings.token = t;
+  const inv = decodeInvite(h.get('i'));
+  const t = inv.token ?? h.get('t');
+  if (t) settings.token = t;
+  if (h.has('i') || h.has('t')) {
+    if (inv.room) h.set('r', inv.room);
+    h.delete('i');
     h.delete('t');
     history.replaceState(null, '', `${location.pathname}${location.search}#${h.toString()}`);
   }
@@ -430,9 +437,33 @@ function Lobby(p: { code: string; room: RoomState; view: ClientView; pid: string
   );
 }
 
+/** Clipboard API where allowed (https, localhost), else the old selection copy. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+}
+
 function Invite({ code }: { code: string }) {
   const [withToken, setWithToken] = useState(true);
-  const url = `${location.origin}${location.pathname}#r=${code}${withToken ? `&t=${encodeURIComponent(settings.token)}` : ''}`;
+  const [copied, setCopied] = useState('');
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(''), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+  const url = `${location.origin}${location.pathname}#${inviteHash(code, withToken ? settings.token : undefined)}`;
   const svg = useMemo(() => {
     const q = qrcode(0, 'M');
     q.addData(url);
@@ -450,7 +481,9 @@ function Invite({ code }: { code: string }) {
           <input type="checkbox" checked={withToken} onChange={(e) => setWithToken(e.currentTarget.checked)} /> ссылка с токеном
         </label>
         <div>
-          <button onClick={() => void navigator.clipboard?.writeText(url)}>Скопировать ссылку</button>
+          <button onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'Скопировано' : 'Не удалось'))}>
+            {copied || 'Скопировать ссылку'}
+          </button>
         </div>
       </div>
     </div>
