@@ -16,7 +16,8 @@ import {
   type HostMsg,
   type RoomState,
 } from '../net/protocol';
-import { GameView, Help, type Playback } from './GameView';
+import { GameView, type Playback } from './GameView';
+import { Help } from './Help';
 import { decodeInvite, inviteHash } from './invite';
 import { settings } from './storage';
 
@@ -66,10 +67,10 @@ export function App() {
           {route.page === 'local' && <> · один экран</>}
         </div>
         <div class="hdr-btns">
-          <button onClick={() => setShowHelp(!showHelp)}>?</button>
+          <button class={showHelp ? 'on' : ''} onClick={() => setShowHelp(!showHelp)}>?</button>
         </div>
       </header>
-      {showHelp && <Help onClose={() => setShowHelp(false)} />}
+      {showHelp && <Help />}
       {route.page === 'home' && <Home />}
       {route.page === 'local' && <Local />}
       {route.page === 'room' && <NetRoom key={route.code} code={route.code} />}

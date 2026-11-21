@@ -126,7 +126,7 @@ export const MOVES: Record<string, MoveDef> = {
   regen: { name: 'Регенерация', speed: 0, range: 'self', heal: 10, block: 8 },
   // особые: вычисляются из обстановки
   advance: { name: 'Наступает', speed: 1, range: 'self' },
-  leap: { name: 'Отскок', speed: 0, range: 'ranged', dmg: 5 },
+  leap: { name: 'Отскок', speed: 0, range: 'ranged', dmg: 4 },
 };
 
 export const ENEMIES: Record<string, EnemyKind> = {

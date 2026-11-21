@@ -2,7 +2,7 @@
 
 Кооперативный колодострой для 3 игроков, каждый со своего телефона. Правила и устройство — в [DESIGN.md](DESIGN.md).
 
-Играть: https://agent-hugo.github.io/warband/
+Играть: [agent-hugo.github.io/warband](https://agent-hugo.github.io/warband/)
 
 ```sh
 npm install

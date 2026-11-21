@@ -123,6 +123,13 @@ header { display: flex; justify-content: space-between; align-items: center; gap
 .reward .hand { margin-top: 6px; }
 .end { text-align: center; padding: 20px; }
 .help { background: #1b2330; border: 1px solid #36507a; border-radius: 10px; padding: 4px 12px; margin-bottom: 8px; font-size: 13px; }
+.help details { border-bottom: 1px solid #2a3a55; padding: 6px 0; }
+.help summary { cursor: pointer; font-weight: 700; font-size: 14px; padding: 4px 0; }
+.help details.help-sub { border: 0; padding: 2px 0 2px 10px; }
+.help details.help-sub summary { font-size: 13px; }
+.help ul { margin: 4px 0; padding-left: 18px; }
+.help li { margin: 2px 0; }
+.hdr-btns button.on { background: #36507a; }
 
 /* сеть */
 a { color: #9ec1ff; }

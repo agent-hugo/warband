@@ -212,7 +212,7 @@ export function intentInfo(s: GameState, e: Enemy): IntentInfo | null {
   const tgt = unitByUid(s, e.intent.target);
   let text = mv.name;
   if (e.intent.move === 'advance') text = `Наступает → ${POS_NAME[Math.max(1, e.pos - 1)]}`;
-  else if (e.intent.move === 'leap') text = `Отскок: ${4 + str} урона и 💨`;
+  else if (e.intent.move === 'leap') text = `Отскок: ${MOVES.leap!.dmg! + str} урона и 💨`;
   else if (mv.dmg) text += ` ${mv.dmg + str}${mv.all ? (mv.range === 'melee' ? ' всем рядом' : ' всем') : ''}`;
   else if (mv.range === 'ally') text += ` +${mv.heal}`;
   else if (mv.str) text += ` +${mv.str} 💪`;
@@ -515,7 +515,7 @@ export function resolveRound(input: GameState): { state: GameState; steps: Step[
       const near = heroesInMelee(s, e);
       const t = near.find((h) => h.uid === it.target) ?? lowestHp(near) ?? lowestHp(liveHeroes(s));
       pending = `${head}: Отскок`;
-      if (t) damage(e, t, 4 + str);
+      if (t) damage(e, t, MOVES.leap!.dmg! + str);
       e.leapUsed = true;
       e.st.away = 2;
       return log(`${e.name} разрывает дистанцию 💨 — ближние атаки до него не достают 2 раунда`);
