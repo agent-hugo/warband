@@ -4,6 +4,7 @@ import type { Pose } from '../game/predict';
 import { Host, type PlayerRow } from '../net/host';
 import { COLORS, normalizeRoom, randomRoomCode, type PresenceMsg } from '../net/protocol';
 import { routeLabel } from '../net/rtc';
+import { browserName, diagText, type DiagReport } from '../net/diag';
 import { Session, type SessionInfo } from '../net/session';
 import { decodeInvite, inviteHash } from './invite';
 import { Joystick } from './joystick';
@@ -199,6 +200,29 @@ function whoFrom(presence: Map<string, PresenceMsg>) {
   };
 }
 
+/** How the last WebRTC attempt went, with a copy button. */
+function DiagBox({ report, title = 'Диагностика WebRTC' }: { report: DiagReport | null; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  const text = diagText(report);
+  return (
+    <details class="diag">
+      <summary>{title}</summary>
+      <p class="muted small">{browserName()}</p>
+      <pre>{text}</pre>
+      <button
+        onClick={() =>
+          void navigator.clipboard?.writeText(text).then(
+            () => setCopied(true),
+            () => {},
+          )
+        }
+      >
+        {copied ? 'Скопировано' : 'Скопировать'}
+      </button>
+    </details>
+  );
+}
+
 // ───────── игрок ─────────
 
 function Play({ code }: { code: string }) {
@@ -306,6 +330,10 @@ function Play({ code }: { code: string }) {
             />
             Только брокер, без WebRTC
           </label>
+          <label class="check">
+            <input type="checkbox" checked={session.brokerPing} onChange={(e) => ((session.brokerPing = e.currentTarget.checked), redraw((x) => x + 1))} />
+            Пинговать брокер раз в секунду и при WebRTC (для сравнения RTT)
+          </label>
           <p class="muted small">Поправок предсказания: {info.corrections}</p>
           <div class="row">
             <button disabled={info.hosting} onClick={() => void session.becomeHost()}>
@@ -315,6 +343,7 @@ function Play({ code }: { code: string }) {
           </div>
           <h4>Позвать</h4>
           <Invite code={code} />
+          <DiagBox report={session.diag?.r ?? null} />
           <button class="close" onClick={() => setMenu(false)}>
             Закрыть
           </button>
@@ -401,6 +430,7 @@ function HostPage({ code }: { code: string }) {
         </table>
         {!rows.length && <p class="muted">Пока никого. Отсканируйте код телефоном:</p>}
         <Invite code={code} />
+        {rows.map((r) => (host.diags.has(r.pid) ? <DiagBox title={`WebRTC с ${r.name}`} report={host.diags.get(r.pid)!} /> : null))}
         <p>
           <button onClick={() => (location.hash = '')}>На главную</button>
         </p>

@@ -21,6 +21,8 @@ export const topics = {
   dn: (room: string) => `${PREFIX}/${room}/dn`,
   /** Host → one player: pongs over the broker. */
   dnTo: (room: string, pid: string) => `${PREFIX}/${room}/dn/${pid}`,
+  /** Retained: how the last WebRTC attempt of a player (or of the host with a player: h-<pid>) went. */
+  diag: (room: string, id: string) => `${PREFIX}/${room}/diag/${id}`,
 };
 
 export interface HostMsg {

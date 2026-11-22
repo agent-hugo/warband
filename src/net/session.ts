@@ -14,6 +14,7 @@ import {
   type UpMsg,
   type Via,
 } from './protocol';
+import { Diag, pairsReport, sdpCandidates, type DiagReport } from './diag';
 import { CHANNEL, gathered, iceServers, routeInfo, routeLabel, type RouteInfo, type TurnConfig } from './rtc';
 
 export interface SessionOptions {
@@ -68,6 +69,10 @@ export class Session {
   mode: 'auto' | 'mqtt' = 'auto';
   predict = true;
   interp = true;
+  /** Ping the host over the broker every second even while WebRTC is up, to compare. */
+  brokerPing = true;
+  /** The last WebRTC attempt, for the menu. */
+  diag: Diag | null = null;
 
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
@@ -162,6 +167,7 @@ export class Session {
   // ───────── WebRTC ─────────
 
   private closeRtc() {
+    if (this.pc && this.diag?.r.outcome === 'идёт') this.diag.r.outcome = 'прервано';
     this.dc?.close();
     this.pc?.close();
     this.pc = null;
@@ -170,10 +176,27 @@ export class Session {
     this.route = null;
   }
 
-  private failRtc(retryMs: number) {
+  private failRtc(retryMs: number, why: string) {
+    const pc = this.pc;
+    const d = this.diag;
+    this.pc = null; // keep it open a moment for its stats
     this.closeRtc();
     this.rtc = 'failed';
     this.retryAt = performance.now() + retryMs;
+    if (d && pc) {
+      d.add(why);
+      d.r.outcome = why;
+      void pairsReport(pc).then((pairs) => {
+        d.r.pairs = pairs;
+        pc.close();
+        this.publishDiag(d.r);
+      });
+    } else pc?.close();
+  }
+
+  /** Kept on the broker (retained) so a failed link can be looked at later. */
+  private publishDiag(r: DiagReport) {
+    if (this.bus.online) void this.bus.publish(topics.diag(this.o.code, this.o.pid), r, true).catch(() => {});
   }
 
   private async connectRtc() {
@@ -187,6 +210,9 @@ export class Session {
     const sid = randomId();
     const pc = new RTCPeerConnection({ iceServers: iceServers(this.o.turn) });
     const dc = pc.createDataChannel('g', CHANNEL);
+    const d = new Diag('player', host.id);
+    d.watch(pc);
+    this.diag = d;
     this.pc = pc;
     this.dc = dc;
     this.sid = sid;
@@ -195,10 +221,19 @@ export class Session {
     dc.onopen = () => {
       if (this.dc !== dc) return;
       this.rtc = 'open';
+      d.add('канал открыт');
+      d.r.outcome = 'open';
       void routeInfo(pc).then((r) => (this.route = r));
+      setTimeout(() => {
+        if (this.pc !== pc) return;
+        void pairsReport(pc).then((pairs) => {
+          d.r.pairs = pairs;
+          this.publishDiag(d.r);
+        });
+      }, 1500);
     };
     dc.onclose = () => {
-      if (this.dc === dc) this.failRtc(3000);
+      if (this.dc === dc) this.failRtc(3000, 'канал закрылся');
     };
     dc.onmessage = (ev) => {
       try {
@@ -208,25 +243,29 @@ export class Session {
       }
     };
     pc.onconnectionstatechange = () => {
-      if (this.pc === pc && pc.connectionState === 'failed') this.failRtc(10_000);
+      if (this.pc === pc && pc.connectionState === 'failed') this.failRtc(10_000, 'соединение не удалось (failed)');
     };
     try {
       await pc.setLocalDescription(await pc.createOffer());
       await gathered(pc);
       if (this.pc !== pc) return;
+      d.r.local = sdpCandidates(pc.localDescription?.sdp);
+      d.add(`предложение отправлено хосту, адресов: ${d.r.local.length}`);
       await this.bus.publish(topics.sig(this.o.code, host.id, this.o.pid), { sid, sdp: pc.localDescription!.toJSON() } satisfies SigMsg);
-    } catch {
-      if (this.pc === pc) this.failRtc(10_000);
+    } catch (e) {
+      if (this.pc === pc) this.failRtc(10_000, `ошибка: ${String(e)}`);
     }
   }
 
   private async onAnswer(m: SigMsg) {
     const pc = this.pc;
     if (!pc || !m?.sdp || m.sid !== this.sid || m.sdp.type !== 'answer' || pc.signalingState !== 'have-local-offer') return;
+    this.diag?.add('ответ хоста получен');
+    if (this.diag) this.diag.r.remote = sdpCandidates(m.sdp.sdp);
     try {
       await pc.setRemoteDescription(m.sdp);
-    } catch {
-      if (this.pc === pc) this.failRtc(10_000);
+    } catch (e) {
+      if (this.pc === pc) this.failRtc(10_000, `ответ не принят: ${String(e)}`);
     }
   }
 
@@ -313,7 +352,8 @@ export class Session {
     this.electHost(now);
     if (this.hostAlive && !this.hosting && this.mode === 'auto' && this.visible) {
       if ((this.rtc === 'off' || this.rtc === 'failed') && now >= this.retryAt) void this.connectRtc();
-      else if (this.rtc === 'connecting' && now - this.rtcSince > RTC_TIMEOUT) this.failRtc(15_000);
+      else if (this.rtc === 'connecting' && now - this.rtcSince > RTC_TIMEOUT)
+        this.failRtc(15_000, this.pc?.signalingState === 'have-local-offer' ? 'хост не ответил за 12 с' : 'за 12 с не соединилось');
     }
     if (now - this.second >= 1000) {
       this.snapRate = Math.round((this.snapCount * 1000) / (now - this.second || 1000));
@@ -322,7 +362,9 @@ export class Session {
       if (this.hostAlive && this.visible) {
         // The same ping both ways, to compare.
         if (!this.hosting && this.dc?.readyState === 'open') this.dc.send(JSON.stringify({ k: 'p', c: now } satisfies UpMsg));
-        this.bus.fast(topics.up(this.o.code, this.o.pid), { k: 'p', c: now } satisfies UpMsg);
+        // Without a direct link the broker is the link, so it is measured anyway.
+        if (this.brokerPing || this.hosting || this.dc?.readyState !== 'open') this.bus.fast(topics.up(this.o.code, this.o.pid), { k: 'p', c: now } satisfies UpMsg);
+        else this.rttMqtt = null;
         this.upSend({ k: 'st', ...this.linkStats() });
         if (this.pc && this.rtc === 'open') void routeInfo(this.pc).then((r) => (this.route = r));
       }

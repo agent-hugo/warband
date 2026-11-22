@@ -13,6 +13,7 @@ import {
   type UpMsg,
   type Via,
 } from './protocol';
+import { Diag, pairsReport, sdpCandidates, type DiagReport } from './diag';
 import { gathered, iceServers, routeInfo, type RouteInfo, type TurnConfig } from './rtc';
 
 export interface HostOptions {
@@ -28,6 +29,8 @@ interface Peer {
   pc: RTCPeerConnection;
   dc: RTCDataChannel | null;
   route: RouteInfo | null;
+  /** Writes down how the attempt went (if not yet), then closes it. */
+  end: (why: string) => void;
 }
 
 export interface PlayerRow {
@@ -58,6 +61,8 @@ export class Host {
   readonly id = randomId();
   readonly since = Date.now();
   readonly bus: Bus;
+  /** The last WebRTC attempt with each player, for the host page. */
+  readonly diags = new Map<string, DiagReport>();
   readonly sim = new Sim();
   readonly presence = new Map<string, PresenceMsg>();
   private offlineAt = new Map<string, number>();
@@ -163,14 +168,32 @@ export class Host {
 
   private async onSig(from: string, m: SigMsg) {
     if (this.retired || typeof RTCPeerConnection === 'undefined' || !m?.sdp || m.sdp.type !== 'offer') return;
-    this.peers.get(from)?.pc.close();
+    this.peers.get(from)?.end('пришла новая попытка');
     const pc = new RTCPeerConnection({ iceServers: iceServers(this.o.turn) });
-    const peer: Peer = { sid: m.sid, pc, dc: null, route: null };
+    const peer: Peer = { sid: m.sid, pc, dc: null, route: null, end: () => {} };
     this.peers.set(from, peer);
+    const d = new Diag('host', from);
+    this.diags.set(from, d.r);
+    d.watch(pc);
+    d.r.remote = sdpCandidates(m.sdp.sdp);
+    d.add(`предложение игрока получено, адресов: ${d.r.remote.length}`);
+    let reported = false;
+    const report = async (outcome: string) => {
+      if (reported) return;
+      reported = true;
+      d.add(outcome);
+      d.r.outcome = outcome;
+      d.r.pairs = await pairsReport(pc);
+      this.publishDiag(from, d.r);
+    };
+    peer.end = (why) => {
+      if (peer.dc?.readyState === 'open') pc.close();
+      else void report(`${why} (ICE: ${pc.iceConnectionState})`).finally(() => pc.close());
+    };
     const drop = () => {
       if (this.peers.get(from) !== peer) return;
       this.peers.delete(from);
-      pc.close();
+      peer.end('не вышло');
       this.changed();
     };
     pc.ondatachannel = (e) => {
@@ -184,6 +207,8 @@ export class Host {
         }
       };
       dc.onopen = () => {
+        d.add('канал открыт');
+        setTimeout(() => void report('open'), 1500);
         this.changed();
         void routeInfo(pc).then((r) => (peer.route = r));
       };
@@ -197,10 +222,16 @@ export class Host {
       await pc.setLocalDescription(await pc.createAnswer());
       await gathered(pc);
       if (this.peers.get(from) !== peer) return;
+      d.r.local = sdpCandidates(pc.localDescription?.sdp);
+      d.add(`ответ отправлен, адресов: ${d.r.local.length}`);
       await this.bus.publish(topics.sig(this.o.code, from, this.id), { sid: m.sid, sdp: pc.localDescription!.toJSON() } satisfies SigMsg);
     } catch {
       drop();
     }
+  }
+
+  private publishDiag(pid: string, r: DiagReport) {
+    if (this.bus.online) void this.bus.publish(topics.diag(this.o.code, `h-${pid}`), r, true).catch(() => {});
   }
 
   private hasDirect(pid: string): boolean {
