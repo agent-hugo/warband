@@ -76,7 +76,7 @@ export class Session {
   mode: 'auto' | 'mqtt' = 'auto';
   predict = true;
   interp = true;
-  /** Ping the host over the broker every second even while WebRTC is up, to compare. */
+  /** Ping the host over the broker every second even while WebRTC is up, to compare. Turned off once the direct link opens. */
   brokerPing = true;
   /** The last WebRTC attempt, for the menu. */
   diag: Diag | null = null;
@@ -230,6 +230,8 @@ export class Session {
     dc.onopen = () => {
       if (this.dc !== dc) return;
       this.rtc = 'open';
+      // The comparison ping is for the time before the direct link: once it is up, stop loading the broker.
+      this.brokerPing = false;
       d.add('канал открыт');
       d.r.outcome = 'open';
       void routeInfo(pc).then((r) => (this.route = r));

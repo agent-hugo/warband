@@ -457,7 +457,7 @@ function Play({ code }: { code: string }) {
           </label>
           <label class="check">
             <input type="checkbox" checked={session.brokerPing} onChange={(e) => ((session.brokerPing = e.currentTarget.checked), redraw((x) => x + 1))} />
-            Пинговать брокер раз в секунду и при WebRTC (для сравнения RTT)
+            Пинговать брокер раз в секунду и при WebRTC (для сравнения RTT; снимается, когда WebRTC соединился)
           </label>
           <RevealCheck onChange={() => session.retryRtc()} />
           <p class="muted small">Поправок предсказания: {info.corrections}</p>
