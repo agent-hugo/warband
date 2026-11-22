@@ -1,5 +1,5 @@
 import type { Pose } from '../game/predict';
-import { WALLS, WORLD, facesLeft, type Vec } from '../game/world';
+import { BUSHES, VIEW, WALLS, WORLD, facesLeft, sees, sightPolygon, type Rect, type Vec } from '../game/world';
 import { COLORS } from '../net/protocol';
 
 // 8×9 pixel sprites facing right. H hat, S skin, E eye, B body, L legs.
@@ -62,6 +62,26 @@ export interface DrawOptions {
   me?: string;
   ghost?: Pose | null;
   minimap?: boolean;
+  /** Who is "it", and whether they stand frozen. */
+  it?: string;
+  itFrozen?: boolean;
+  /** Draw fog around this point. */
+  fog?: Vec | null;
+}
+
+/** A few darker leaves in a bush, the same every frame. */
+function leaves(r: Rect): Vec[] {
+  const out: Vec[] = [];
+  let s = r.x * 7 + r.y * 13;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; i < (r.w * r.h) / 260; i++) out.push({ x: r.x + 6 + rnd() * (r.w - 12), y: r.y + 6 + rnd() * (r.h - 12) });
+  return out;
+}
+const LEAVES = BUSHES.map(leaves);
+
+function roundRect(g: CanvasRenderingContext2D, r: Rect, rad: number) {
+  g.beginPath();
+  g.roundRect(r.x, r.y, r.w, r.h, rad);
 }
 
 /** Draws the world on a canvas that fills its element. */
@@ -139,14 +159,55 @@ export class Renderer {
     }
 
     // players, back to front
-    const list = [...poses].sort((a, b) => a[1].y - b[1].y);
-    for (const [pid, p] of list) this.player(g, now, pid, p, who(pid), pid === o.me);
+    // In the fog, whoever this phone does not see right now is not drawn (the host keeps them a moment longer).
+    const fog = o.fog;
+    const list = [...poses].filter(([pid, p]) => !fog || pid === o.me || sees(fog, p)).sort((a, b) => a[1].y - b[1].y);
+    for (const [pid, p] of list) this.player(g, now, pid, p, who(pid), pid === o.me, pid === o.it ? (o.itFrozen ? 'frozen' : 'it') : null);
     for (const pid of this.motion.keys()) if (!poses.has(pid)) this.motion.delete(pid);
 
-    if (o.minimap) this.minimap(g, dpr, w, poses, who, o.me);
+    // bushes over whoever is inside
+    BUSHES.forEach((b, i) => {
+      g.globalAlpha = 0.82;
+      g.fillStyle = '#2d7a34';
+      roundRect(g, b, 14);
+      g.fill();
+      g.fillStyle = '#21602a';
+      for (const l of LEAVES[i]!) {
+        g.beginPath();
+        g.arc(l.x, l.y, 5, 0, Math.PI * 2);
+        g.fill();
+      }
+      g.globalAlpha = 1;
+    });
+
+    if (o.fog) this.fog(g, o.fog);
+
+    if (o.minimap) this.minimap(g, dpr, w, new Map(list), who, o.me);
   }
 
-  private player(g: CanvasRenderingContext2D, now: number, pid: string, p: Pose, who: Who, me: boolean) {
+  /** Darkness outside what is seen from `p`, softened towards the edge of sight. */
+  private fog(g: CanvasRenderingContext2D, p: Vec) {
+    const poly = sightPolygon(p);
+    const m = 2000;
+    g.beginPath();
+    g.rect(-m, -m, WORLD.w + 2 * m, WORLD.h + 2 * m);
+    g.moveTo(poly[0]!.x, poly[0]!.y);
+    for (const q of poly) g.lineTo(q.x, q.y);
+    g.closePath();
+    g.fillStyle = 'rgba(4,6,10,0.72)';
+    g.fill('evenodd');
+    const grad = g.createRadialGradient(p.x, p.y, VIEW * 0.6, p.x, p.y, VIEW);
+    grad.addColorStop(0, 'rgba(4,6,10,0)');
+    grad.addColorStop(1, 'rgba(4,6,10,0.55)');
+    g.beginPath();
+    g.moveTo(poly[0]!.x, poly[0]!.y);
+    for (const q of poly) g.lineTo(q.x, q.y);
+    g.closePath();
+    g.fillStyle = grad;
+    g.fill();
+  }
+
+  private player(g: CanvasRenderingContext2D, now: number, pid: string, p: Pose, who: Who, me: boolean, role: 'it' | 'frozen' | null) {
     let m = this.motion.get(pid);
     if (!m) {
       m = { at: { x: p.x, y: p.y }, left: false, movingUntil: 0 };
@@ -164,6 +225,12 @@ export class Renderer {
     g.beginPath();
     g.ellipse(p.x, p.y + 8, 10, 4, 0, 0, Math.PI * 2);
     g.fill();
+    if (role) {
+      g.fillStyle = role === 'frozen' ? '#7fc8ff66' : '#ff303066';
+      g.beginPath();
+      g.ellipse(p.x, p.y + 8, 17, 7, 0, 0, Math.PI * 2);
+      g.fill();
+    }
     if (me) {
       g.strokeStyle = '#ffffffcc';
       g.lineWidth = 1.2;
@@ -185,7 +252,7 @@ export class Renderer {
     g.textAlign = 'center';
     g.lineWidth = 2.5;
     g.strokeStyle = '#000000aa';
-    const label = who.online ? who.name : `💤 ${who.name}`;
+    const label = `${who.online ? '' : '💤 '}${role === 'frozen' ? '❄ ' : role === 'it' ? '🔴 ' : ''}${who.name}`;
     g.strokeText(label, p.x, top - 3);
     g.fillStyle = '#fff';
     g.fillText(label, p.x, top - 3);
@@ -204,6 +271,8 @@ export class Renderer {
     g.fillRect(x0, y0, mw, mh);
     g.fillStyle = '#7d6650';
     for (const r of WALLS) g.fillRect(x0 + r.x * k, y0 + r.y * k, Math.max(1, r.w * k), Math.max(1, r.h * k));
+    g.fillStyle = '#2d7a34';
+    for (const r of BUSHES) g.fillRect(x0 + r.x * k, y0 + r.y * k, r.w * k, r.h * k);
     for (const [pid, p] of poses) {
       g.fillStyle = COLORS[who(pid).color] ?? '#fff';
       const s = pid === me ? 4 : 3;

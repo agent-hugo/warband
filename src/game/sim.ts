@@ -1,4 +1,5 @@
-import { STOP, spawnPoint, step, type Vec } from './world';
+import type { TagState } from './tag';
+import { SPEED, STOP, spawnPoint, step, type Vec } from './world';
 
 /** [seq, dir]: one tick of a player's joystick. */
 export type Input = [number, number];
@@ -13,6 +14,8 @@ export interface Snap {
   /** Host clock, ms. */
   h: number;
   ps: SnapPlayer[];
+  /** The game: phase, who is "it", scores. */
+  g?: TagState;
 }
 
 interface SimPlayer extends Vec {
@@ -62,14 +65,16 @@ export class Sim {
     if (p.q.length > QUEUE_MAX) p.q.splice(0, p.q.length - QUEUE_MAX);
   }
 
-  tick(): void {
+  /** `speed`: units a second of each player during this tick. */
+  tick(speed: (pid: string) => number = () => SPEED): void {
     this.n++;
-    for (const p of this.players.values()) {
+    for (const [pid, p] of this.players) {
+      const v = speed(pid);
       const take = p.q.length > QUEUE_SOFT ? 2 : p.q.length ? 1 : 0;
       let moved = false;
       for (let i = 0; i < take; i++) {
         const [seq, dir] = p.q.shift()!;
-        const next = step(p, dir);
+        const next = step(p, dir, v);
         if (next.x !== p.x || next.y !== p.y) moved = true;
         p.x = next.x;
         p.y = next.y;
@@ -80,10 +85,13 @@ export class Sim {
     }
   }
 
-  snapshot(h: number): Snap {
+  /** `only`: just these players (what one of them sees). */
+  snapshot(h: number, only?: Set<string>, g?: TagState): Snap {
     const ps: SnapPlayer[] = [];
-    for (const [pid, p] of this.players) ps.push([pid, p.x, p.y, p.idle < 3 ? p.dir : STOP, p.ack]);
-    return { k: 's', n: this.n, h: Math.round(h), ps };
+    for (const [pid, p] of this.players) if (!only || only.has(pid)) ps.push([pid, p.x, p.y, p.idle < 3 ? p.dir : STOP, p.ack]);
+    const s: Snap = { k: 's', n: this.n, h: Math.round(h), ps };
+    if (g) s.g = g;
+    return s;
   }
 
   /** Positions to continue from on another host. */

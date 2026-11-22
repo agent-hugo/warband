@@ -9,7 +9,6 @@ export const TICK_HZ = 30;
 export const TICK_MS = 1000 / TICK_HZ;
 /** World units per second. */
 export const SPEED = 150;
-const STEP = SPEED / TICK_HZ;
 /** Half the side of a player's square hit box. */
 export const HALF = 9;
 
@@ -48,6 +47,18 @@ export const WALLS: Rect[] = [
   { x: 585, y: WORLD.h - BORDER - 150, w: 30, h: 150 },
 ];
 
+/** Bushes: walk through them; whoever stands inside is seen only from close by. */
+export const BUSHES: Rect[] = [
+  { x: 60, y: 415, w: 90, h: 70 },
+  { x: 1050, y: 415, w: 90, h: 70 },
+  { x: 290, y: 255, w: 95, h: 65 },
+  { x: 815, y: 580, w: 95, h: 65 },
+  { x: 440, y: 55, w: 110, h: 55 },
+  { x: 650, y: 790, w: 110, h: 55 },
+  { x: 540, y: 570, w: 120, h: 50 },
+  { x: 540, y: 280, w: 120, h: 50 },
+];
+
 /** Directions: index 0..255 → unit vector (rounded, the same on every engine). Screen axes: y grows down. */
 export const DIRS = 256;
 const DX: number[] = [];
@@ -79,11 +90,11 @@ function hits(x: number, y: number, w: Rect): boolean {
   return x - HALF < w.x + w.w && x + HALF > w.x && y - HALF < w.y + w.h && y + HALF > w.y;
 }
 
-/** One tick of movement in a direction; walls stop each axis separately, so players slide along them. */
-export function step(p: Vec, dir: number): Vec {
-  if (dir < 0) return p;
-  const dx = DX[dir]! * STEP;
-  const dy = DY[dir]! * STEP;
+/** One tick of movement in a direction at `speed` units a second; walls stop each axis separately, so players slide along them. */
+export function step(p: Vec, dir: number, speed = SPEED): Vec {
+  if (dir < 0 || speed <= 0) return p;
+  const dx = DX[dir]! * (speed / TICK_HZ);
+  const dy = DY[dir]! * (speed / TICK_HZ);
   let x = r2(p.x + dx);
   for (const w of WALLS) if (hits(x, p.y, w)) x = dx > 0 ? w.x - HALF : w.x + w.w + HALF;
   let y = r2(p.y + dy);
@@ -104,4 +115,72 @@ export function spawnPoint(others: Vec[], rnd = Math.random): Vec {
     return p;
   }
   return { x: 450, y: 450 };
+}
+
+/** The bush a point stands in, or -1. */
+export function bushAt(p: Vec): number {
+  return BUSHES.findIndex((b) => p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h);
+}
+
+/**
+ * Where a ray from `a` towards `b` first enters the rect, as a fraction of
+ * a→b (0..1), or Infinity if it misses. Slab method; `a` is outside the rect.
+ */
+function enters(a: Vec, dx: number, dy: number, r: Rect): number {
+  let t0 = 0;
+  let t1 = 1;
+  for (const [o, d, lo, hi] of [
+    [a.x, dx, r.x, r.x + r.w],
+    [a.y, dy, r.y, r.y + r.h],
+  ] as const) {
+    if (d === 0) {
+      if (o <= lo || o >= hi) return Infinity;
+      continue;
+    }
+    let ta = (lo - o) / d;
+    let tb = (hi - o) / d;
+    if (ta > tb) [ta, tb] = [tb, ta];
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+    if (t0 >= t1) return Infinity;
+  }
+  return t0;
+}
+
+/** Whether no wall stands between two points. */
+export function clearLine(a: Vec, b: Vec): boolean {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return WALLS.every((w) => enters(a, dx, dy, w) === Infinity);
+}
+
+/** How far one sees, world units. */
+export const VIEW = 190;
+/** Someone in a bush is seen only this close, or from the same bush. */
+export const BUSH_VIEW = 45;
+
+/** Whether a player at `from` sees one at `to`. */
+export function sees(from: Vec, to: Vec): boolean {
+  const d = Math.hypot(to.x - from.x, to.y - from.y);
+  if (d > VIEW) return false;
+  const b = bushAt(to);
+  if (b >= 0 && d > BUSH_VIEW && bushAt(from) !== b) return false;
+  return clearLine(from, to);
+}
+
+/**
+ * The area seen from `p`: the end of each of `rays` rays, cut by walls and by
+ * the view distance. For drawing the fog.
+ */
+export function sightPolygon(p: Vec, rays = 360): Vec[] {
+  const out: Vec[] = [];
+  for (let i = 0; i < rays; i++) {
+    const a = (i / rays) * Math.PI * 2;
+    const dx = Math.cos(a) * VIEW;
+    const dy = Math.sin(a) * VIEW;
+    let t = 1;
+    for (const w of WALLS) t = Math.min(t, enters(p, dx, dy, w));
+    out.push({ x: p.x + dx * t, y: p.y + dy * t });
+  }
+  return out;
 }

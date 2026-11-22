@@ -1,5 +1,6 @@
 import { Predictor, Timeline, type Pose } from '../game/predict';
 import type { Snap } from '../game/sim';
+import { speedOf, type TagState } from '../game/tag';
 import { TICK_MS } from '../game/world';
 import { Host } from './host';
 import { Bus, type BrokerConfig } from './mqtt';
@@ -44,6 +45,8 @@ export interface SessionInfo {
   snapRate: number;
   corrections: number;
   presence: [string, PresenceMsg][];
+  game: TagState | null;
+  gameN: number;
 }
 
 /** How far in the past others are drawn, ms: enough to have the next snapshot already. */
@@ -63,6 +66,9 @@ export class Session {
   presence = new Map<string, PresenceMsg>();
   readonly pred = new Predictor();
   readonly tl = new Timeline();
+  /** The game as of the last snapshot, and that snapshot's tick. */
+  game: TagState | null = null;
+  gameN = 0;
   /** The host running in this tab, if any. */
   local: Host | null = null;
 
@@ -115,7 +121,6 @@ export class Session {
       else this.presence.delete(id);
     });
     void this.bus.subscribe(topics.sigTo(code, pid), (_t, p) => void this.onAnswer(p as SigMsg));
-    void this.bus.subscribe(topics.dn(code), (_t, p) => this.onDown(p as DownMsg, 'mqtt'), 0);
     void this.bus.subscribe(topics.dnTo(code, pid), (_t, p) => this.onDown(p as DownMsg, 'mqtt'), 0);
     this.timer = setInterval(() => this.housekeeping(), 250);
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibility);
@@ -158,6 +163,7 @@ export class Session {
     this.closeRtc();
     this.pred.reset();
     this.tl.reset();
+    this.game = null;
     this.lastN = -1;
     this.lastVia = null;
     this.rttRtc = null;
@@ -320,6 +326,9 @@ export class Session {
     this.lastVia = via;
     this.snapCount++;
     this.tl.push(m as Snap, now);
+    this.game = m.g ?? null;
+    this.gameN = m.n;
+    this.pred.speed = speedOf(this.game, this.o.pid, m.n + 1);
     const mine = m.ps.find((p) => p[0] === this.o.pid);
     if (mine) this.pred.server({ x: mine[1], y: mine[2] }, mine[4], this.predict);
   }
@@ -439,6 +448,8 @@ export class Session {
       snapRate: this.snapRate,
       corrections: this.pred.corrections,
       presence: [...this.presence],
+      game: this.game,
+      gameN: this.gameN,
     };
   }
 

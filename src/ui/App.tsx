@@ -1,6 +1,8 @@
 import qrcode from 'qrcode-generator';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Pose } from '../game/predict';
+import { foggy, speedOf, type TagState } from '../game/tag';
+import { TICK_HZ } from '../game/world';
 import { Host, type PlayerRow } from '../net/host';
 import { COLORS, normalizeRoom, randomRoomCode, type PresenceMsg } from '../net/protocol';
 import { routeLabel } from '../net/rtc';
@@ -258,6 +260,57 @@ function DiagBox({ report, title = 'Диагностика WebRTC' }: { report: 
   );
 }
 
+// ───────── игра ─────────
+
+const clock = (ticks: number) => {
+  const sec = Math.max(0, Math.ceil(ticks / TICK_HZ));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+};
+
+/** What is going on in the game, one or two lines; `me` is '' on the host page. */
+function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: string; name: (pid: string) => string }) {
+  if (!g) return null;
+  const left = g.end - n;
+  const mine = g.it === me;
+  let line: string;
+  if (g.ph === 'wait') line = 'Догонялки начнутся, когда в комнате будет хотя бы двое';
+  else if (g.ph === 'hide')
+    line = mine ? `Вы водите! Остальные прячутся: ${Math.ceil(left / TICK_HZ)}` : `Прячьтесь! Водит ${name(g.it)}: ${Math.ceil(left / TICK_HZ)}`;
+  else if (g.ph === 'chase') {
+    const fz = g.fz - n;
+    if (mine) line = fz > 0 ? `❄ Вы водите, стоите ещё ${Math.ceil(fz / TICK_HZ)}` : `🔴 Вы водите — догоните кого-нибудь · ${clock(left)}`;
+    else line = `Водит ${name(g.it)}${fz > 0 ? ' ❄' : ''} · ${clock(left)}`;
+  } else line = `Раунд окончен. Следующий через ${Math.ceil(left / TICK_HZ)}`;
+  const t = g.tag && n - g.tag[2] < 2 * TICK_HZ && g.ph === 'chase' ? g.tag : null;
+  return (
+    <div class={`banner ${mine && g.ph !== 'wait' && g.ph !== 'end' ? 'it' : ''}`}>
+      <div>{line}</div>
+      {t && <div class="small">{t[1] === me ? 'Вас осалили — теперь вы водите!' : `${name(t[1])} теперь водит`}</div>}
+      {g.ph === 'end' && <Scores g={g} name={name} me={me} />}
+    </div>
+  );
+}
+
+/** Who was "it" how long this round; the least wins. */
+function Scores({ g, name, me }: { g: TagState; name: (pid: string) => string; me: string }) {
+  const rows = [...g.sc].sort((a, b) => a[1] - b[1]);
+  const best = rows[0]?.[1];
+  return (
+    <table class="scores">
+      <tbody>
+        {rows.map(([pid, t, w]) => (
+          <tr class={pid === me ? 'me' : ''}>
+            <td>{g.ph === 'end' && t === best ? '🏆' : ''}</td>
+            <td>{name(pid)}</td>
+            <td>водил(а) {Math.round(t / TICK_HZ)} с</td>
+            <td class="muted">побед: {w}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 // ───────── игрок ─────────
 
 function Play({ code }: { code: string }) {
@@ -281,17 +334,33 @@ function Play({ code }: { code: string }) {
     const joy = new Joystick(el);
     let raf = 0;
     let last = performance.now();
+    let buzzed = session.game?.tag?.[2] ?? -1;
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
       session.frame(now, joy.dir());
       const { all, ghost: g } = session.poses(now, now - last);
       last = now;
-      r.draw(now, all, whoFrom(session.presence), { follow: session.o.pid, me: session.o.pid, ghost: ghostRef.current ? g : null, minimap: true });
+      const game = session.game;
+      r.draw(now, all, whoFrom(session.presence), {
+        follow: session.o.pid,
+        me: session.o.pid,
+        ghost: ghostRef.current ? g : null,
+        minimap: true,
+        it: game?.it,
+        itFrozen: !!game && speedOf(game, game.it, session.gameN) === 0,
+        fog: foggy(game) ? all.get(session.o.pid) : null,
+      });
+      // A buzz when touched.
+      const t = game?.tag;
+      if (t && t[1] === session.o.pid && t[2] !== buzzed) {
+        buzzed = t[2];
+        navigator.vibrate?.(250);
+      }
       joy.draw(el.getContext('2d')!, Math.min(window.devicePixelRatio || 1, 3));
       if (joy.used) setHint(false);
     };
     raf = requestAnimationFrame(loop);
-    const t = setInterval(() => setInfo(session.info()), 400);
+    const t = setInterval(() => setInfo(session.info()), 250);
     return () => {
       cancelAnimationFrame(raf);
       clearInterval(t);
@@ -325,6 +394,9 @@ function Play({ code }: { code: string }) {
       <button class="menu-btn" onClick={() => setMenu(!menu)}>
         ☰
       </button>
+      {!status && (
+        <GameBanner g={info.game} n={info.gameN} me={session.o.pid} name={(pid) => session.presence.get(pid)?.name ?? '?'} />
+      )}
       {status && <div class="status">{status}</div>}
       {hint && !status && <div class="hint">Коснитесь экрана и тяните в нужную сторону</div>}
       {menu && (
@@ -343,6 +415,16 @@ function Play({ code }: { code: string }) {
                 </li>
               ))}
           </ul>
+          {info.game && info.game.ph !== 'wait' && (
+            <>
+              <h4>Этот раунд</h4>
+              <Scores g={info.game} me={session.o.pid} name={(pid) => session.presence.get(pid)?.name ?? '?'} />
+              <p class="muted small">
+                Водящий бегает быстрее. Кого коснулся — тот водит и пару секунд стоит. Видно только то, что рядом и не за стеной; в
+                кустах — только вплотную. Побеждает тот, кто водил меньше всех.
+              </p>
+            </>
+          )}
           <h4>Опыты</h4>
           <label class="check">
             <input type="checkbox" checked={session.predict} onChange={(e) => ((session.predict = e.currentTarget.checked), redraw((x) => x + 1))} />
@@ -412,10 +494,11 @@ function HostPage({ code }: { code: string }) {
       raf = requestAnimationFrame(loop);
       const poses = new Map<string, Pose>();
       for (const [pid, p] of host.sim.players) poses.set(pid, { x: p.x, y: p.y, dir: p.idle < 3 ? p.dir : -1 });
-      r.draw(now, poses, whoFrom(host.presence));
+      const g = host.tag.st;
+      r.draw(now, poses, whoFrom(host.presence), { it: g.it, itFrozen: speedOf(g, g.it, host.sim.n) === 0 });
     };
     raf = requestAnimationFrame(loop);
-    const t = setInterval(() => setRows(host.rows()), 500);
+    const t = setInterval(() => setRows(host.rows()), 250);
     const leave = () => void host.stop();
     window.addEventListener('pagehide', leave);
     return () => {
@@ -441,6 +524,14 @@ function HostPage({ code }: { code: string }) {
           </p>
         )}
         {state === 'running' && <p class="muted small">Хост работает: {host.tickRate} тактов/с. Вкладку можно оставить в фоне.</p>}
+        {state === 'running' && (
+          <div class="hostgame">
+            <GameBanner g={host.tag.st} n={host.sim.n} me="" name={(pid) => host.presence.get(pid)?.name ?? '?'} />
+            {host.tag.st.ph !== 'wait' && host.tag.st.ph !== 'end' && (
+              <Scores g={host.tag.st} me="" name={(pid) => host.presence.get(pid)?.name ?? '?'} />
+            )}
+          </div>
+        )}
         <table class="rows">
           <thead>
             <tr>

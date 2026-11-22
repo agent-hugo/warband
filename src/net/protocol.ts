@@ -17,9 +17,7 @@ export const topics = {
   /** Player → host over the broker (inputs, pings, stats), QoS 0. */
   up: (room: string, pid: string) => `${PREFIX}/${room}/up/${pid}`,
   upAll: (room: string) => `${PREFIX}/${room}/up/+`,
-  /** Host → everyone: snapshots over the broker, for players without a direct link. */
-  dn: (room: string) => `${PREFIX}/${room}/dn`,
-  /** Host → one player: pongs over the broker. */
+  /** Host → one player over the broker: snapshots (without a direct link) and pongs. */
   dnTo: (room: string, pid: string) => `${PREFIX}/${room}/dn/${pid}`,
   /** Retained: how the last WebRTC attempt of a player (or of the host with a player: h-<pid>) went. */
   diag: (room: string, id: string) => `${PREFIX}/${room}/diag/${id}`,

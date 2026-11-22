@@ -1,5 +1,5 @@
 import type { Input, Snap } from './sim';
-import { STOP, step, type Vec } from './world';
+import { SPEED, STOP, step, type Vec } from './world';
 
 /** Unacknowledged inputs kept for replay: 3 s. */
 const PENDING_MAX = 90;
@@ -18,6 +18,8 @@ export class Predictor {
   smooth: Vec = { x: 0, y: 0 };
   seq = Date.now(); // grows across page reloads, so a host never takes new inputs for old copies
   idle = 0;
+  /** Own speed, as the host's last snapshot says (it changes with the role). */
+  speed = SPEED;
   /** Corrections in a row bigger than a pixel: mispredictions. */
   corrections = 0;
 
@@ -28,7 +30,7 @@ export class Predictor {
     const inp: Input = [++this.seq, dir];
     this.pending.push(inp);
     if (this.pending.length > PENDING_MAX) this.pending.shift();
-    if (predict && this.self) this.self = step(this.self, dir);
+    if (predict && this.self) this.self = step(this.self, dir, this.speed);
     return inp;
   }
 
@@ -38,12 +40,12 @@ export class Predictor {
     let p: Vec = { x: pos.x, y: pos.y };
     if (!predict || !this.self) {
       // First position (or no prediction): inputs the host has not applied yet still count.
-      if (predict) for (const [, dir] of this.pending) p = step(p, dir);
+      if (predict) for (const [, dir] of this.pending) p = step(p, dir, this.speed);
       this.self = p;
       this.smooth = { x: 0, y: 0 };
       return;
     }
-    for (const [, dir] of this.pending) p = step(p, dir);
+    for (const [, dir] of this.pending) p = step(p, dir, this.speed);
     const ex = this.self.x + this.smooth.x - p.x;
     const ey = this.self.y + this.smooth.y - p.y;
     if (Math.abs(this.self.x - p.x) > 1 || Math.abs(this.self.y - p.y) > 1) this.corrections++;
@@ -64,6 +66,7 @@ export class Predictor {
     this.self = null;
     this.pending = [];
     this.smooth = { x: 0, y: 0 };
+    this.speed = SPEED;
   }
 }
 

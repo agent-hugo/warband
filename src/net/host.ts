@@ -1,4 +1,5 @@
 import { Sim } from '../game/sim';
+import { Tag } from '../game/tag';
 import { TICK_MS, type Vec } from '../game/world';
 import { Bus, type BrokerConfig } from './mqtt';
 import {
@@ -65,6 +66,7 @@ export class Host {
   /** The last WebRTC attempt with each player, for the host page. */
   readonly diags = new Map<string, DiagReport>();
   readonly sim = new Sim();
+  readonly tag = new Tag();
   readonly presence = new Map<string, PresenceMsg>();
   private offlineAt = new Map<string, number>();
   private saved = new Map<string, Vec>();
@@ -139,6 +141,7 @@ export class Host {
     } else {
       this.presence.delete(pid);
       this.sim.remove(pid);
+      this.tag.forget(pid);
     }
     this.changed();
   }
@@ -242,10 +245,11 @@ export class Host {
     return this.peers.get(pid)?.dc?.readyState === 'open';
   }
 
-  /** Someone online has neither a direct link nor this tab. */
-  private needsBroker(): boolean {
-    for (const [pid, p] of this.presence) if (p.online && pid !== this.local?.pid && !this.hasDirect(pid)) return true;
-    return false;
+  /** Online players with neither a direct link nor this tab. */
+  private brokerPlayers(): string[] {
+    const out: string[] = [];
+    for (const [pid, p] of this.presence) if (p.online && pid !== this.local?.pid && !this.hasDirect(pid)) out.push(pid);
+    return out;
   }
 
   /** Runs the ticks that are due; a late timer catches up a little, a long stall is skipped. */
@@ -263,16 +267,27 @@ export class Host {
     }
   }
 
+  /** Players in the game now: in the world and awake (or in this tab). */
+  private inGame(): Map<string, Vec> {
+    const out = new Map<string, Vec>();
+    for (const [pid, p] of this.sim.players) if (pid === this.local?.pid || this.presence.get(pid)?.online) out.set(pid, p);
+    return out;
+  }
+
   private tick() {
     this.ticksThisSecond++;
-    const sim = this.sim;
-    sim.tick();
-    const snap = sim.snapshot(performance.now());
-    const json = JSON.stringify(snap);
-    for (const p of this.peers.values())
-      if (p.dc?.readyState === 'open' && p.dc.bufferedAmount < 65536) p.dc.send(json);
-    this.local?.deliver(snap);
-    if (sim.n % BROKER_EVERY === 0 && this.needsBroker()) this.bus.fast(topics.dn(this.o.code), snap);
+    const { sim, tag } = this;
+    sim.tick((pid) => tag.speed(pid, sim.n + 1));
+    const ps = this.inGame();
+    tag.update(sim.n, ps);
+    const now = performance.now();
+    const viaBroker = sim.n % BROKER_EVERY === 0;
+    // Everyone gets only what they see.
+    const view = (pid: string) => sim.snapshot(now, tag.visibleTo(pid, sim.n, sim.players, ps), tag.st);
+    for (const [pid, p] of this.peers)
+      if (p.dc?.readyState === 'open' && p.dc.bufferedAmount < 65536) p.dc.send(JSON.stringify(view(pid)));
+    if (this.local) this.local.deliver(view(this.local.pid));
+    if (viaBroker) for (const pid of this.brokerPlayers()) this.bus.fast(topics.dnTo(this.o.code, pid), view(pid));
     if (sim.n % 150 === 0) this.savePositions();
   }
 
@@ -281,6 +296,7 @@ export class Host {
     for (const [pid, at] of this.offlineAt)
       if (now - at > DROP_AFTER_MS) {
         this.sim.remove(pid);
+        this.tag.forget(pid);
         this.offlineAt.delete(pid);
       }
     for (const p of this.peers.values()) if (p.dc?.readyState === 'open') void routeInfo(p.pc).then((r) => (p.route = r));
