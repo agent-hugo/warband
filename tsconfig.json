@@ -20,9 +20,7 @@
     "jsxImportSource": "preact"
   },
   "include": [
-    "src",
-    "tests",
-    "vite.config.ts",
-    "scripts"
+    "fogtag",
+    "vite.config.ts"
   ]
 }

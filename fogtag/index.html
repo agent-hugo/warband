@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Догонялки в тумане — Warband</title>
+    <script>
+      // The page itself may be cached for a few minutes while a new release has
+      // already replaced the hashed bundle it points to. If a bundle fails to
+      // load, fetch the page past the cache and reload once (not more often
+      // than every 30 seconds, so a real outage does not loop).
+      addEventListener(
+        'error',
+        function (e) {
+          var el = e.target;
+          var src = el && (el.src || el.href);
+          if (!src || !/\/assets\//.test(src)) return;
+          try {
+            var last = +sessionStorage.getItem('reloadedAt') || 0;
+            if (Date.now() - last < 30000) return;
+            sessionStorage.setItem('reloadedAt', String(Date.now()));
+          } catch (_) {
+            return;
+          }
+          fetch(location.href, { cache: 'reload' }).then(
+            function () { location.reload(); },
+            function () { location.reload(); }
+          );
+        },
+        true
+      );
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>
