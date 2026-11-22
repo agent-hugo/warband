@@ -55,6 +55,21 @@ describe('tag', () => {
     expect(t.st.sc.find(([id]) => id === 'a')![1]).toBe(0);
   });
 
+  it('waits until everyone has a direct link', () => {
+    const t = new Tag(() => 0);
+    const ps = at({ a: { x: 100, y: 100 }, b: { x: 800, y: 800 } });
+    const ready = new Set(['a']);
+    t.update(1, ps, (id) => ready.has(id));
+    expect(t.st).toMatchObject({ ph: 'wait', wt: ['b'] });
+    ready.add('b');
+    t.update(2, ps, (id) => ready.has(id));
+    expect(t.st).toMatchObject({ ph: 'hide', it: 'a', wt: [] });
+    // Once the round is on, a lost link does not stop it.
+    ready.delete('b');
+    t.update(3, ps, (id) => ready.has(id));
+    expect(t.st.ph).toBe('hide');
+  });
+
   it('passes the role on a touch and freezes the new one', () => {
     const t = new Tag(() => 0);
     const ps = at({ a: { x: 100, y: 100 }, b: { x: 500, y: 100 } });

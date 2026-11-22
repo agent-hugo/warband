@@ -398,6 +398,7 @@ export class Session {
       route: this.route ? `${this.route.local}/${this.route.remote}` : '',
       rttRtc: this.rttRtc,
       rttMqtt: this.rttMqtt,
+      only: this.mode === 'mqtt',
     };
   }
 

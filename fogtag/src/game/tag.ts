@@ -5,6 +5,9 @@
  * shortest time wins it. Everyone sees only what is near and not behind a
  * wall, and someone in a bush only from close by.
  *
+ * A round starts only once everyone has a direct link to the host, so nobody
+ * plays the first seconds through the slower broker.
+ *
  * Runs on the host. The state goes out in every snapshot, so a phone knows
  * its own speed (for prediction) and what to show.
  */
@@ -38,6 +41,8 @@ export interface TagState {
   sc: [string, number, number][];
   /** The last touch: [from, to, tick]. */
   tag: [string, string, number] | null;
+  /** In 'wait': who the round waits for (no direct link yet). */
+  wt?: string[];
 }
 
 /** Speed of a player at tick `n` under state `g` (no game: normal). */
@@ -53,7 +58,7 @@ export function foggy(g: TagState | null | undefined): boolean {
 }
 
 export class Tag {
-  st: TagState = { ph: 'wait', end: 0, it: '', fz: 0, sc: [], tag: null };
+  st: TagState = { ph: 'wait', end: 0, it: '', fz: 0, sc: [], tag: null, wt: [] };
   private itTicks = new Map<string, number>();
   private wins = new Map<string, number>();
   /** viewer → target → last tick seen. */
@@ -65,16 +70,24 @@ export class Tag {
     return speedOf(this.st, pid, n);
   }
 
-  /** After the world moved to tick `n`; `ps` holds the players in the game (awake). */
-  update(n: number, ps: Map<string, Vec>): void {
+  /**
+   * After the world moved to tick `n`; `ps` holds the players in the game
+   * (awake), `ready` tells whether one may start a round (has a direct link).
+   */
+  update(n: number, ps: Map<string, Vec>, ready: (pid: string) => boolean = () => true): void {
     const st = this.st;
     const ids = [...ps.keys()];
+    st.wt = [];
     if (ids.length < 2) {
       Object.assign(st, { ph: 'wait', end: 0, it: '', fz: 0 });
       this.refreshScores(ids);
       return;
     }
-    if (st.ph === 'wait') this.startRound(n, this.pick(ids));
+    if (st.ph === 'wait') {
+      st.wt = ids.filter((id) => !ready(id));
+      if (st.wt.length) return this.refreshScores(ids);
+      this.startRound(n, this.pick(ids));
+    }
     else if (!ps.has(st.it)) {
       // "It" left: someone else takes over, standing still for a moment.
       st.it = this.pick(ids);

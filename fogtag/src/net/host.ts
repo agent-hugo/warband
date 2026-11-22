@@ -159,7 +159,7 @@ export class Host {
       if (!this.sim.players.has(pid) && this.presence.has(pid)) this.sim.add(pid, this.saved.get(pid));
       this.sim.input(pid, m.in);
     } else if (m.k === 'p') this.send(pid, { k: 'o', c: m.c }, via);
-    else if (m.k === 'st') this.stats.set(pid, { via: m.via, route: m.route, rttRtc: m.rttRtc, rttMqtt: m.rttMqtt });
+    else if (m.k === 'st') this.stats.set(pid, { via: m.via, route: m.route, rttRtc: m.rttRtc, rttMqtt: m.rttMqtt, only: m.only });
   }
 
   private send(pid: string, m: DownMsg, via: Via) {
@@ -246,6 +246,11 @@ export class Host {
   }
 
   /** Online players with neither a direct link nor this tab. */
+  /** Ready to start a round: a direct link is up, or the player is on this device or chose the broker. */
+  private linked(pid: string): boolean {
+    return pid === this.local?.pid || this.hasDirect(pid) || !!this.stats.get(pid)?.only;
+  }
+
   private brokerPlayers(): string[] {
     const out: string[] = [];
     for (const [pid, p] of this.presence) if (p.online && pid !== this.local?.pid && !this.hasDirect(pid)) out.push(pid);
@@ -279,7 +284,7 @@ export class Host {
     const { sim, tag } = this;
     sim.tick((pid) => tag.speed(pid, sim.n + 1));
     const ps = this.inGame();
-    tag.update(sim.n, ps);
+    tag.update(sim.n, ps, (pid) => this.linked(pid));
     const now = performance.now();
     const viaBroker = sim.n % BROKER_EVERY === 0;
     // Everyone gets only what they see.

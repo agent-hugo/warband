@@ -273,7 +273,12 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
   const left = g.end - n;
   const mine = g.it === me;
   let line: string;
-  if (g.ph === 'wait') line = 'Догонялки начнутся, когда в комнате будет хотя бы двое';
+  if (g.ph === 'wait')
+    line = !g.wt?.length
+      ? 'Догонялки начнутся, когда в комнате будет хотя бы двое'
+      : g.wt.includes(me)
+        ? 'Ждём прямого соединения с хостом…'
+        : `Ждём прямого соединения: ${g.wt.map(name).join(', ')}`;
   else if (g.ph === 'hide')
     line = mine ? `Вы водите! Остальные прячутся: ${Math.ceil(left / TICK_HZ)}` : `Прячьтесь! Водит ${name(g.it)}: ${Math.ceil(left / TICK_HZ)}`;
   else if (g.ph === 'chase') {
@@ -285,6 +290,9 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
   return (
     <div class={`banner ${mine && g.ph !== 'wait' && g.ph !== 'end' ? 'it' : ''}`}>
       <div>{line}</div>
+      {g.ph === 'wait' && g.wt?.includes(me) && (
+        <div class="small">Не соединяется? В меню: «Показывать свой адрес в сети» или «Только брокер».</div>
+      )}
       {t && <div class="small">{t[1] === me ? 'Вас осалили — теперь вы водите!' : `${name(t[1])} теперь водит`}</div>}
       {g.ph === 'end' && <Scores g={g} name={name} me={me} />}
     </div>

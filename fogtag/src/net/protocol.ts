@@ -59,6 +59,8 @@ export interface LinkStats {
   route: string;
   rttRtc: number | null;
   rttMqtt: number | null;
+  /** The player chose the broker only: the game does not wait for a direct link. */
+  only?: boolean;
 }
 
 export type UpMsg = { k: 'i'; in: Input[] } | { k: 'p'; c: number } | ({ k: 'st' } & LinkStats);
