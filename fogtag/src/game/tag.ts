@@ -8,6 +8,9 @@
  * A round starts only once everyone has a direct link to the host, so nobody
  * plays the first seconds through the slower broker.
  *
+ * Whoever hides standing still for too long is warned, and a little later
+ * "it" sees them on the minimap until they have run about for a while.
+ *
  * Runs on the host. The state goes out in every snapshot, so a phone knows
  * its own speed (for prediction) and what to show.
  */
@@ -23,7 +26,13 @@ export const HIDE_TICKS = 5 * TICK_HZ;
 export const ROUND_TICKS = 120 * TICK_HZ;
 export const END_TICKS = 8 * TICK_HZ;
 /** The new "it" stands still this long after being touched. */
-export const FREEZE_TICKS = 2 * TICK_HZ;
+export const FREEZE_TICKS = 5 * TICK_HZ;
+/** A hider standing still this long in the chase is warned... */
+export const STILL_TICKS = 15 * TICK_HZ;
+/** ...and this long after the warning "it" sees them on the minimap... */
+export const WARN_TICKS = 5 * TICK_HZ;
+/** ...until they have been moving this long (in all, since the warning). */
+export const RUN_OFF_TICKS = 5 * TICK_HZ;
 /** Centre to centre: the two boxes touch, plus a little for lag. */
 export const TOUCH = HALF * 2 + 6;
 /** Someone just out of sight stays in the snapshots this long, so they do not flicker at the edge. */
@@ -43,6 +52,13 @@ export interface TagState {
   tag: [string, string, number] | null;
   /** In 'wait': who the round waits for (no direct link yet). */
   wt?: string[];
+  /** Hiders who stood still too long: [pid, tick "it" starts to see them on the minimap, ticks run since the warning]. */
+  lz?: [string, number, number][];
+}
+
+/** Whether `pid` stands out on the minimap of "it" at tick `n`. */
+export function exposed(g: TagState | null | undefined, pid: string, n: number): boolean {
+  return !!g?.lz?.some(([id, at]) => id === pid && n >= at);
 }
 
 /** Speed of a player at tick `n` under state `g` (no game: normal). */
@@ -58,11 +74,17 @@ export function foggy(g: TagState | null | undefined): boolean {
 }
 
 export class Tag {
-  st: TagState = { ph: 'wait', end: 0, it: '', fz: 0, sc: [], tag: null, wt: [] };
+  st: TagState = { ph: 'wait', end: 0, it: '', fz: 0, sc: [], tag: null, wt: [], lz: [] };
   private itTicks = new Map<string, number>();
   private wins = new Map<string, number>();
   /** viewer → target → last tick seen. */
   private seen = new Map<string, Map<string, number>>();
+  /** Where everyone was on the last tick, to tell who moves. */
+  private last = new Map<string, Vec>();
+  /** Ticks each hider has been standing still. */
+  private still = new Map<string, number>();
+  /** Warned hiders: when "it" starts to see them, and how long they have run since. */
+  private lazy = new Map<string, { at: number; run: number }>();
 
   constructor(private rnd: () => number = Math.random) {}
 
@@ -78,6 +100,7 @@ export class Tag {
     const st = this.st;
     const ids = [...ps.keys()];
     st.wt = [];
+    st.lz = [];
     if (ids.length < 2) {
       Object.assign(st, { ph: 'wait', end: 0, it: '', fz: 0 });
       this.refreshScores(ids);
@@ -100,6 +123,7 @@ export class Tag {
     } else if (st.ph === 'chase') {
       this.itTicks.set(st.it, (this.itTicks.get(st.it) ?? 0) + 1);
       if (n >= st.fz) this.touch(n, ps);
+      this.watchStill(n, ps);
       if (n >= st.end) {
         st.ph = 'end';
         st.end = n + END_TICKS;
@@ -114,6 +138,33 @@ export class Tag {
     const t = (id: string) => this.itTicks.get(id) ?? 0;
     const best = Math.min(...ids.map(t));
     return ids.filter((id) => t(id) === best);
+  }
+
+  /** Who stands still too long, and who has run enough to be let off. */
+  private watchStill(n: number, ps: Map<string, Vec>) {
+    for (const [id, p] of ps) {
+      const q = this.last.get(id);
+      this.last.set(id, { x: p.x, y: p.y });
+      if (id === this.st.it) {
+        this.still.delete(id);
+        this.lazy.delete(id);
+        continue;
+      }
+      const moved = !q || q.x !== p.x || q.y !== p.y;
+      const lz = this.lazy.get(id);
+      if (lz) {
+        if (moved && ++lz.run >= RUN_OFF_TICKS) {
+          this.lazy.delete(id);
+          this.still.set(id, 0);
+        }
+        continue;
+      }
+      const s = moved ? 0 : (this.still.get(id) ?? 0) + 1;
+      this.still.set(id, s);
+      if (s >= STILL_TICKS) this.lazy.set(id, { at: n + WARN_TICKS, run: 0 });
+    }
+    for (const id of this.lazy.keys()) if (!ps.has(id)) this.lazy.delete(id);
+    this.st.lz = [...this.lazy].map(([id, l]) => [id, l.at, l.run]);
   }
 
   private touch(n: number, ps: Map<string, Vec>) {
@@ -138,6 +189,9 @@ export class Tag {
   private startRound(n: number, it: string) {
     Object.assign(this.st, { ph: 'hide', end: n + HIDE_TICKS, it, fz: n + HIDE_TICKS, tag: null });
     this.itTicks.clear();
+    this.last.clear();
+    this.still.clear();
+    this.lazy.clear();
   }
 
   private pick(ids: string[]): string {
@@ -150,7 +204,8 @@ export class Tag {
 
   /**
    * Who `viewer` gets in its snapshot at tick `n`: itself always; others in
-   * the fog only when seen now or a moment ago; everyone otherwise.
+   * the fog only when seen now or a moment ago (and "it" also gets whoever
+   * stood still too long, for the minimap); everyone otherwise.
    * `all` is everyone in the world, `ps` the players in the game.
    */
   visibleTo(viewer: string, n: number, all: Map<string, Vec>, ps: Map<string, Vec>): Set<string> {
@@ -163,13 +218,16 @@ export class Tag {
     for (const [id, p] of ps) {
       if (id === viewer) continue;
       if (sees(from, p)) mem.set(id, n);
-      if (n - (mem.get(id) ?? -Infinity) <= SEEN_GRACE) out.add(id);
+      if (n - (mem.get(id) ?? -Infinity) <= SEEN_GRACE || (viewer === this.st.it && exposed(this.st, id, n))) out.add(id);
     }
     return out;
   }
 
   forget(pid: string): void {
     this.seen.delete(pid);
+    this.last.delete(pid);
+    this.still.delete(pid);
+    this.lazy.delete(pid);
     for (const m of this.seen.values()) m.delete(pid);
   }
 }

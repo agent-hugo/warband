@@ -67,6 +67,8 @@ export interface DrawOptions {
   itFrozen?: boolean;
   /** Draw fog around this point. */
   fog?: Vec | null;
+  /** Shown on the minimap even when out of sight (hiders who stood still too long, for "it"). */
+  exposed?: Set<string>;
 }
 
 /** A few darker leaves in a bush, the same every frame. */
@@ -182,7 +184,10 @@ export class Renderer {
 
     if (o.fog) this.fog(g, o.fog);
 
-    if (o.minimap) this.minimap(g, dpr, w, new Map(list), who, o.me);
+    if (o.minimap) {
+      const ex = [...(o.exposed ?? [])].filter((pid) => poses.has(pid)).map((pid) => [pid, poses.get(pid)!] as const);
+      this.minimap(g, now, dpr, w, new Map([...list, ...ex]), who, o.me, o.exposed);
+    }
   }
 
   /** Darkness outside what is seen from `p`, softened towards the edge of sight. */
@@ -259,7 +264,16 @@ export class Renderer {
     g.globalAlpha = 1;
   }
 
-  private minimap(g: CanvasRenderingContext2D, dpr: number, w: number, poses: Map<string, Pose>, who: (pid: string) => Who, me?: string) {
+  private minimap(
+    g: CanvasRenderingContext2D,
+    now: number,
+    dpr: number,
+    w: number,
+    poses: Map<string, Pose>,
+    who: (pid: string) => Who,
+    me?: string,
+    exposed?: Set<string>,
+  ) {
     const mw = 96;
     const k = mw / WORLD.w;
     const mh = WORLD.h * k;
@@ -277,6 +291,14 @@ export class Renderer {
       g.fillStyle = COLORS[who(pid).color] ?? '#fff';
       const s = pid === me ? 4 : 3;
       g.fillRect(x0 + p.x * k - s / 2, y0 + p.y * k - s / 2, s, s);
+      if (exposed?.has(pid)) {
+        // A pulsing red ring, so "it" notices.
+        g.strokeStyle = '#ff3030';
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.arc(x0 + p.x * k, y0 + p.y * k, 4 + 2 * Math.abs(Math.sin(now / 200)), 0, Math.PI * 2);
+        g.stroke();
+      }
     }
     g.globalAlpha = 1;
   }

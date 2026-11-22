@@ -130,3 +130,36 @@ describe('prediction with roles', () => {
     expect(x).toBeGreaterThan(300 + 20 * (SPEED / 30));
   });
 });
+
+describe('standing still', () => {
+  it('warns a hider, shows them to "it" on the minimap, and lets them off after running', async () => {
+    const { STILL_TICKS, RUN_OFF_TICKS, exposed } = await import('../src/game/tag');
+    const t = new Tag(() => 0);
+    const ps = at({ a: { x: 100, y: 100 }, b: { x: 1000, y: 700 } });
+    let n = 1;
+    t.update(n, ps);
+    while (t.st.ph === 'hide') t.update(++n, ps);
+    for (let i = 0; i <= STILL_TICKS; i++) t.update(++n, ps);
+    const [id, seeAt] = t.st.lz![0]!;
+    expect(id).toBe('b');
+    expect(exposed(t.st, 'b', n)).toBe(false);
+    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(false);
+    while (n < seeAt) t.update(++n, ps);
+    expect(exposed(t.st, 'b', n)).toBe(true);
+    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(true);
+    expect(t.visibleTo('b', n, ps, ps).has('a')).toBe(false);
+    // Running a little and stopping does not help; running long enough does.
+    let x = 1000;
+    for (let i = 0; i < RUN_OFF_TICKS - 1; i++) {
+      ps.set('b', { x: (x -= 2), y: 700 });
+      t.update(++n, ps);
+      if (i === 10) for (let k = 0; k < 30; k++) t.update(++n, ps);
+    }
+    expect(t.st.lz).toHaveLength(1);
+    ps.set('b', { x: (x -= 2), y: 700 });
+    t.update(++n, ps);
+    expect(t.st.lz).toEqual([]);
+    // "It" itself is never flagged.
+    expect(t.st.it).toBe('a');
+  });
+});

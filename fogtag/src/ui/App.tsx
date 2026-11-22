@@ -1,7 +1,7 @@
 import qrcode from 'qrcode-generator';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Pose } from '../game/predict';
-import { foggy, speedOf, type TagState } from '../game/tag';
+import { RUN_OFF_TICKS, exposed, foggy, speedOf, type TagState } from '../game/tag';
 import { TICK_HZ } from '../game/world';
 import { Host, type PlayerRow } from '../net/host';
 import { COLORS, normalizeRoom, randomRoomCode, type PresenceMsg } from '../net/protocol';
@@ -287,6 +287,9 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
     else line = `Водит ${name(g.it)}${fz > 0 ? ' ❄' : ''} · ${clock(left)}`;
   } else line = `Раунд окончен. Следующий через ${Math.ceil(left / TICK_HZ)}`;
   const t = g.tag && n - g.tag[2] < 2 * TICK_HZ && g.ph === 'chase' ? g.tag : null;
+  const lz = g.ph === 'chase' ? g.lz?.find(([pid]) => pid === me) : undefined;
+  const runLeft = lz ? Math.ceil((RUN_OFF_TICKS - lz[2]) / TICK_HZ) : 0;
+  const seenOnMap = g.ph === 'chase' && (mine || !me) ? (g.lz ?? []).filter(([pid]) => exposed(g, pid, n)).map(([pid]) => name(pid)) : [];
   return (
     <div class={`banner ${mine && g.ph !== 'wait' && g.ph !== 'end' ? 'it' : ''}`}>
       <div>{line}</div>
@@ -294,6 +297,14 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
         <div class="small">Не соединяется? В меню: «Показывать свой адрес в сети» или «Только брокер».</div>
       )}
       {t && <div class="small">{t[1] === me ? 'Вас осалили — теперь вы водите!' : `${name(t[1])} теперь водит`}</div>}
+      {lz && (
+        <div class="lazy">
+          {n < lz[1]
+            ? `⚠ Вы долго стоите! Через ${Math.ceil((lz[1] - n) / TICK_HZ)} с водящий увидит вас на миникарте — бегите!`
+            : `👁 Водящий видит вас на миникарте. Побегайте ещё ${runLeft} с`}
+        </div>
+      )}
+      {seenOnMap.length > 0 && <div class="small">👁 На миникарте видно: {seenOnMap.join(', ')}</div>}
       {g.ph === 'end' && <Scores g={g} name={name} me={me} />}
     </div>
   );
@@ -343,6 +354,7 @@ function Play({ code }: { code: string }) {
     let raf = 0;
     let last = performance.now();
     let buzzed = session.game?.tag?.[2] ?? -1;
+    let warned = -1;
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
       session.frame(now, joy.dir());
@@ -357,7 +369,17 @@ function Play({ code }: { code: string }) {
         it: game?.it,
         itFrozen: !!game && speedOf(game, game.it, session.gameN) === 0,
         fog: foggy(game) ? all.get(session.o.pid) : null,
+        exposed:
+          game?.it === session.o.pid && game.ph === 'chase'
+            ? new Set(game.lz?.filter(([pid]) => exposed(game, pid, session.gameN)).map(([pid]) => pid))
+            : undefined,
       });
+      // A buzz when warned for standing still.
+      const lz = game?.lz?.find(([pid]) => pid === session.o.pid);
+      if (lz && lz[1] !== warned) {
+        warned = lz[1];
+        navigator.vibrate?.([200, 100, 200]);
+      }
       // A buzz when touched.
       const t = game?.tag;
       if (t && t[1] === session.o.pid && t[2] !== buzzed) {
@@ -405,6 +427,12 @@ function Play({ code }: { code: string }) {
       {!status && (
         <GameBanner g={info.game} n={info.gameN} me={session.o.pid} name={(pid) => session.presence.get(pid)?.name ?? '?'} />
       )}
+      {(() => {
+        const g = info.game;
+        const lz = g?.ph === 'chase' ? g.lz?.find(([pid]) => pid === session.o.pid) : undefined;
+        // Before "it" sees you: the whole screen blinks; after: a red frame pulses.
+        return lz ? <div class={info.gameN < lz[1] ? 'flash' : 'flash seen'} /> : null;
+      })()}
       {status && <div class="status">{status}</div>}
       {hint && !status && <div class="hint">Коснитесь экрана и тяните в нужную сторону</div>}
       {menu && (
