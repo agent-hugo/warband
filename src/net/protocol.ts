@@ -1,6 +1,4 @@
-import { HERO_ORDER } from '../engine/content';
-import { hero, newGame, pickReward, planCard, planMove, setReady, unplan } from '../engine/engine';
-import type { GameState, HeroId, Step } from '../engine/types';
+import type { Input, Snap } from '../game/sim';
 
 /** Every topic of the game lives under this prefix. */
 export const PREFIX = 'warband/r';
@@ -8,105 +6,65 @@ export const PREFIX = 'warband/r';
 export const topics = {
   /** Retained: which host runs the room and whether it is connected. */
   host: (room: string) => `${PREFIX}/${room}/host`,
-  /** Retained: the whole room (lobby, game, last resolution). */
-  state: (room: string) => `${PREFIX}/${room}/state`,
-  /** Retained: a player's name and whether the device is awake. */
+  /** Retained: positions saved by the host now and then, for the next host. */
+  pos: (room: string) => `${PREFIX}/${room}/pos`,
+  /** Retained: a player's name, colour and whether the device is awake. */
   presence: (room: string, pid: string) => `${PREFIX}/${room}/p/${pid}`,
   presenceAll: (room: string) => `${PREFIX}/${room}/p/+`,
-  /** Player → host commands. */
-  cmd: (room: string, pid: string) => `${PREFIX}/${room}/cmd/${pid}`,
-  cmdAll: (room: string) => `${PREFIX}/${room}/cmd/+`,
-  /** Host → player answers to commands that failed. */
-  reply: (room: string, pid: string) => `${PREFIX}/${room}/reply/${pid}`,
+  /** WebRTC offers and answers: sig/<to>/<from>. */
+  sig: (room: string, to: string, from: string) => `${PREFIX}/${room}/sig/${to}/${from}`,
+  sigTo: (room: string, to: string) => `${PREFIX}/${room}/sig/${to}/+`,
+  /** Player → host over the broker (inputs, pings, stats), QoS 0. */
+  up: (room: string, pid: string) => `${PREFIX}/${room}/up/${pid}`,
+  upAll: (room: string) => `${PREFIX}/${room}/up/+`,
+  /** Host → everyone: snapshots over the broker, for players without a direct link. */
+  dn: (room: string) => `${PREFIX}/${room}/dn`,
+  /** Host → one player: pongs over the broker. */
+  dnTo: (room: string, pid: string) => `${PREFIX}/${room}/dn/${pid}`,
 };
 
 export interface HostMsg {
   id: string;
   online: boolean;
+  /** When this host took the room (ms, its own clock): the newer host wins. */
+  since: number;
+  /** Who runs it: a player's name, or empty for a host page. */
+  name: string;
 }
 
 export interface PresenceMsg {
   name: string;
+  color: number;
   online: boolean;
 }
 
-export type Seats = Record<HeroId, string | null>;
-
-export interface RoomState {
-  v: 1;
-  /** Grows with every publish. */
-  rev: number;
-  /** Player id on each hero. One player may take several heroes. */
-  seats: Seats;
-  /** Names of the players who took seats. */
-  names: Record<string, string>;
-  game: GameState | null;
-  /** The last round resolution, for playback on the phones. */
-  anim?: { id: number; steps: Step[] };
+export interface PosMsg {
+  v: 2;
+  ps: [string, number, number][];
 }
 
-export type GameOp =
-  | { op: 'card'; seat: HeroId; uid: string; target?: string }
-  | { op: 'move'; seat: HeroId; dir: 1 | -1 }
-  | { op: 'unplan'; seat: HeroId; index: number }
-  | { op: 'ready'; seat: HeroId; ready: boolean }
-  | { op: 'reward'; seat: HeroId; card: string | null };
-
-export type RoomOp =
-  | { op: 'seat'; seat: HeroId; take: boolean }
-  | { op: 'start'; battle: number }
-  | { op: 'lobby' };
-
-export type Op = GameOp | RoomOp;
-export type CmdMsg = Op & { seq: number };
-
-export interface ReplyMsg {
-  seq: number;
-  err: string;
+export interface SigMsg {
+  sid: string;
+  sdp: RTCSessionDescriptionInit;
 }
 
-export function emptyRoom(): RoomState {
-  return { v: 1, rev: 0, seats: { guard: null, blade: null, mystic: null }, names: {}, game: null };
+/** How a message travelled. */
+export type Via = 'local' | 'rtc' | 'mqtt';
+
+/** What a player reports about its link, shown on the host page. */
+export interface LinkStats {
+  /** 'local' | 'rtc' | 'mqtt' */
+  via: Via;
+  /** Candidate types of the WebRTC pair, e.g. "host/host". */
+  route: string;
+  rttRtc: number | null;
+  rttMqtt: number | null;
 }
 
-export const isGameOp = (o: Op): o is GameOp =>
-  o.op === 'card' || o.op === 'move' || o.op === 'unplan' || o.op === 'ready' || o.op === 'reward';
+export type UpMsg = { k: 'i'; in: Input[] } | { k: 'p'; c: number } | ({ k: 'st' } & LinkStats);
+export type DownMsg = Snap | { k: 'o'; c: number };
 
-/** Applies a game command to a state in place; an error text if it is not allowed. */
-export function applyGameOp(s: GameState, o: GameOp): string | null {
-  if (!HERO_ORDER.includes(o.seat)) return 'Нет такого героя';
-  const h = hero(s, o.seat);
-  if (o.op === 'reward') {
-    if (s.phase !== 'reward') return 'Сейчас не время наград';
-    if (!s.offers[o.seat]) return 'Награда уже выбрана';
-    pickReward(s, o.seat, o.card);
-    return null;
-  }
-  if (s.phase !== 'plan') return 'Сейчас не планирование';
-  if (h.down) return `${h.name} без сознания`;
-  if (o.op === 'ready') {
-    setReady(s, o.seat, o.ready);
-    return null;
-  }
-  if (h.ready) return 'Сначала снимите «Готов»';
-  if (o.op === 'card') return planCard(s, o.seat, o.uid, o.target);
-  if (o.op === 'move') return planMove(s, o.seat, o.dir);
-  if (o.index < 0 || o.index >= h.plan.length) return 'Нет такого пункта плана';
-  unplan(s, o.seat, o.index);
-  return null;
-}
-
-/** Steps without what playback never shows, to keep the message small. */
-export function slimSteps(steps: Step[]): Step[] {
-  return steps.map((st) => ({
-    text: st.text,
-    state: { ...st.state, log: [], heroes: st.state.heroes.map((h) => ({ ...h, owned: [], draw: [] })) },
-  }));
-}
-
-export function startGame(battle: number): GameState {
-  return newGame(Date.now(), battle);
-}
+export const COLORS = ['#e5484d', '#f0b429', '#4cc38a', '#3e9bf0', '#a875ff', '#ff7ab8', '#ff8f3f', '#e6e8ec'];
 
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 

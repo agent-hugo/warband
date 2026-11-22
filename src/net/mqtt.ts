@@ -95,27 +95,11 @@ export class Bus {
    * Resolves on the SUBACK; the broker sends the retained messages before
    * it, so by then the handler has seen all of them.
    */
-  subscribe(filter: string, fn: Handler): Promise<void> {
+  subscribe(filter: string, fn: Handler, qos: 0 | 1 = 1): Promise<void> {
     this.handlers.push({ filter, fn });
-    const done = this.client.subscribeAsync(filter, { qos: 1 }).then(() => undefined);
+    const done = this.client.subscribeAsync(filter, { qos }).then(() => undefined);
     done.catch(() => {}); // most callers do not wait
     return done;
-  }
-
-  /** Topics of the retained messages under a filter, without staying subscribed. */
-  async retainedTopics(filter: string): Promise<string[]> {
-    const found = new Set<string>();
-    const onMessage = (topic: string, buf: Buffer, packet: IPublishPacket) => {
-      if (packet.retain && buf.length > 0 && matches(filter, topic)) found.add(topic);
-    };
-    this.client.on('message', onMessage);
-    try {
-      await this.client.subscribeAsync(filter, { qos: 1 });
-    } finally {
-      this.client.off('message', onMessage);
-    }
-    await this.client.unsubscribeAsync(filter);
-    return [...found];
   }
 
   /** `expire: false` keeps a retained message for good. */
@@ -125,6 +109,11 @@ export class Bus {
       const properties = retain && expire ? { messageExpiryInterval: RETAIN_EXPIRY_S } : undefined;
       this.client.publish(topic, body, { qos: 1, retain, properties }, (err) => (err ? reject(err) : resolve()));
     });
+  }
+
+  /** Fire and forget: QoS 0, not retained. For frequent realtime messages; dropped while offline. */
+  fast(topic: string, payload: unknown): void {
+    if (this.online) this.client.publish(topic, JSON.stringify(payload), { qos: 0 });
   }
 
   end(): Promise<void> {

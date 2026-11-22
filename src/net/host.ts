@@ -1,42 +1,88 @@
-import { HERO_ORDER } from '../engine/content';
-import { allReady, resolveRound } from '../engine/engine';
-import type { HeroId } from '../engine/types';
-import type { Bus } from './mqtt';
+import { Sim } from '../game/sim';
+import { TICK_MS, type Vec } from '../game/world';
+import { Bus, type BrokerConfig } from './mqtt';
 import {
-  applyGameOp,
-  emptyRoom,
-  isGameOp,
-  slimSteps,
-  startGame,
+  randomId,
   topics,
-  type CmdMsg,
+  type DownMsg,
   type HostMsg,
+  type LinkStats,
+  type PosMsg,
   type PresenceMsg,
-  type RoomState,
+  type SigMsg,
+  type UpMsg,
+  type Via,
 } from './protocol';
+import { gathered, iceServers, routeInfo, type RouteInfo, type TurnConfig } from './rtc';
+
+export interface HostOptions {
+  cfg: BrokerConfig;
+  code: string;
+  /** The player running it in their tab, or '' for a host page. */
+  name: string;
+  turn: TurnConfig | null;
+}
+
+interface Peer {
+  sid: string;
+  pc: RTCPeerConnection;
+  dc: RTCDataChannel | null;
+  route: RouteInfo | null;
+}
+
+export interface PlayerRow {
+  pid: string;
+  name: string;
+  color: number;
+  online: boolean;
+  /** How the host reaches the player now. */
+  via: Via;
+  route: RouteInfo | null;
+  /** What the player measured. */
+  stats: LinkStats | null;
+}
+
+/** Players offline this long leave the world. */
+const DROP_AFTER_MS = 120_000;
+/** Snapshots over the broker go out every Nth tick (10 per second). */
+const BROKER_EVERY = 3;
 
 /**
- * The authoritative game of one room. All changes go through it and are
- * published as one retained state message, so another host can take over
- * from the broker at any moment: the newest host announces itself on the
- * host topic, and a host that sees another one there stops.
+ * Runs the world for a room: takes inputs from players over WebRTC data
+ * channels (or the broker when a direct link did not come up) and sends back
+ * snapshots 30 times a second. Its own broker connection has a last will on
+ * the host topic, so players notice a crash. The newest host wins: an older
+ * one that sees it stops.
  */
 export class Host {
-  room: RoomState = emptyRoom();
-  presence = new Map<string, PresenceMsg>();
-  private seen = new Map<string, number[]>();
-  private retired = false;
+  readonly id = randomId();
+  readonly since = Date.now();
+  readonly bus: Bus;
+  readonly sim = new Sim();
+  readonly presence = new Map<string, PresenceMsg>();
+  private offlineAt = new Map<string, number>();
+  private saved = new Map<string, Vec>();
+  readonly peers = new Map<string, Peer>();
+  readonly stats = new Map<string, LinkStats>();
+  private local: { pid: string; deliver: (m: DownMsg) => void } | null = null;
+  private stopTicker: (() => void) | null = null;
+  private t0 = 0;
+  private done = 0;
   private announced = false;
+  retired = false;
+  /** Ticks in the last second. */
+  tickRate = 0;
+  private ticksThisSecond = 0;
+  private secondAt = 0;
+  onRetire?: () => void;
   private listeners = new Set<() => void>();
 
-  constructor(
-    private bus: Bus,
-    readonly code: string,
-    readonly id: string,
-  ) {}
+  constructor(private o: HostOptions) {
+    this.bus = new Bus(o.cfg, { will: { topic: topics.host(o.code), payload: this.msg(false) } });
+  }
 
-  get stopped(): boolean {
-    return this.retired;
+  private msg(online: boolean): HostMsg {
+    return { id: this.id, online, since: this.since, name: this.o.name };
   }
 
   subscribe(fn: () => void): () => void {
@@ -48,123 +94,230 @@ export class Host {
     for (const l of this.listeners) l();
   }
 
-  async start(): Promise<void> {
-    // Retained state arrives before the SUBACK: continue the stored game.
-    let stored: RoomState | null = null;
-    const unsub = this.bus.subscribe(topics.state(this.code), (_t, p) => {
-      if (!stored && isRoom(p)) stored = p;
+  /** The player in this tab gets snapshots without a network hop. */
+  attachLocal(pid: string, deliver: (m: DownMsg) => void) {
+    this.local = { pid, deliver };
+  }
+
+  /** `initial`: positions the tab already knows, fresher than the saved ones. */
+  async start(initial?: [string, number, number][]): Promise<void> {
+    const { code } = this.o;
+    await this.bus.ready();
+    await this.bus.subscribe(topics.pos(code), (_t, p, meta) => {
+      const m = p as PosMsg | null;
+      if (meta.retained && m?.v === 2 && Array.isArray(m.ps) && !initial)
+        for (const [pid, x, y] of m.ps) this.saved.set(pid, { x, y });
     });
-    await unsub;
-    if (stored) this.room = stored;
-    await this.bus.subscribe(topics.presenceAll(this.code), (t, p) => {
-      const pid = t.split('/').pop()!;
-      if (p && typeof p === 'object' && 'name' in p) this.presence.set(pid, p as PresenceMsg);
-      else this.presence.delete(pid);
-      this.changed();
-    });
-    await this.bus.subscribe(topics.host(this.code), (_t, p) => {
-      const m = p as HostMsg | null;
-      if (this.retired || !m || !this.announced) return;
-      if (m.id !== this.id && m.online) {
-        this.retired = true;
-        this.changed();
-      } else if (m.id !== this.id || !m.online) {
-        // A previous host's last will overwrote us: announce again.
-        void this.announce();
-      }
-    });
-    await this.bus.subscribe(topics.cmdAll(this.code), (t, p) => {
-      const pid = t.split('/').pop()!;
-      if (p && typeof p === 'object') this.handle(pid, p as CmdMsg);
-    });
-    this.announced = true;
-    await this.announce();
-    await this.publish();
-  }
-
-  private announce() {
-    return this.bus.publish(topics.host(this.code), { id: this.id, online: true } satisfies HostMsg, true);
-  }
-
-  /** Whether the player's device is connected and awake. */
-  online(pid: string | null): boolean {
-    return !!pid && !!this.presence.get(pid)?.online;
-  }
-
-  private handle(pid: string, c: CmdMsg) {
-    if (this.retired || typeof c.seq !== 'number') return;
-    const seen = this.seen.get(pid) ?? [];
-    if (seen.includes(c.seq)) return; // QoS 1 may deliver twice
-    this.seen.set(pid, [...seen.slice(-20), c.seq]);
-    const err = this.apply(pid, c);
-    if (err) void this.bus.publish(topics.reply(this.code, pid), { seq: c.seq, err });
-    else void this.publish();
-  }
-
-  /** Applies a command; an error text if refused. */
-  apply(pid: string, c: CmdMsg): string | null {
-    const r = this.room;
-    if (isGameOp(c)) {
-      if (!r.game) return 'Игра ещё не началась';
-      const owner = r.seats[c.seat];
-      if (owner !== pid && this.online(owner)) return 'Этим героем играет другой игрок';
-      const g = structuredClone(r.game);
-      const err = applyGameOp(g, c);
-      if (err) return err;
-      if (allReady(g)) {
-        const { state, steps } = resolveRound(g);
-        r.game = state;
-        r.anim = { id: (r.anim?.id ?? 0) + 1, steps: slimSteps(steps) };
-      } else r.game = g;
-      return null;
-    }
-    if (c.op === 'seat') {
-      if (!HERO_ORDER.includes(c.seat)) return 'Нет такого героя';
-      const owner = r.seats[c.seat];
-      if (c.take) {
-        if (owner && owner !== pid && this.online(owner)) return 'Место занято';
-        r.seats[c.seat] = pid;
-        const name = this.presence.get(pid)?.name;
-        if (name) r.names[pid] = name;
-      } else if (owner === pid) r.seats[c.seat] = null;
-      return null;
-    }
-    if (c.op === 'start') {
-      const free = HERO_ORDER.filter((id) => !r.seats[id]);
-      if (free.length) return 'Сначала займите всех героев (один игрок может взять несколько)';
-      r.game = startGame(Math.max(0, Math.min(3, c.battle | 0)));
-      r.anim = undefined;
-      return null;
-    }
-    if (c.op === 'lobby') {
-      r.game = null;
-      r.anim = undefined;
-      return null;
-    }
-    return 'Неизвестная команда';
-  }
-
-  async publish(): Promise<void> {
+    for (const [pid, x, y] of initial ?? []) this.saved.set(pid, { x, y });
+    await this.bus.subscribe(topics.presenceAll(code), (t, p) => this.onPresence(t.split('/').pop()!, p));
+    await this.bus.subscribe(topics.host(code), (_t, p) => this.onHostMsg(p as HostMsg | null));
+    await this.bus.subscribe(topics.sigTo(code, this.id), (t, p) => void this.onSig(t.split('/').pop()!, p as SigMsg));
+    await this.bus.subscribe(topics.upAll(code), (t, p) => this.onUp(t.split('/').pop()!, p as UpMsg, 'mqtt'), 0);
     if (this.retired) return;
-    this.room.rev++;
-    for (const [pid, p] of this.presence) if (Object.values(this.room.seats).includes(pid)) this.room.names[pid] = p.name;
+    this.announced = true;
+    await this.bus.publish(topics.host(code), this.msg(true), true);
+    this.t0 = performance.now();
+    this.secondAt = this.t0;
+    this.stopTicker = startTicker(() => this.pump());
     this.changed();
-    await this.bus.publish(topics.state(this.code), this.room, true);
   }
 
-  /** Marks the host as gone on purpose (the last will covers crashes). */
+  private onPresence(pid: string, p: unknown) {
+    if (p && typeof p === 'object' && 'name' in p) {
+      const m = p as PresenceMsg;
+      this.presence.set(pid, m);
+      if (m.online) {
+        this.offlineAt.delete(pid);
+        if (!this.sim.players.has(pid)) this.sim.add(pid, this.saved.get(pid));
+      } else if (!this.offlineAt.has(pid)) this.offlineAt.set(pid, Date.now());
+    } else {
+      this.presence.delete(pid);
+      this.sim.remove(pid);
+    }
+    this.changed();
+  }
+
+  private onHostMsg(m: HostMsg | null) {
+    if (this.retired || !m || m.id === this.id) return;
+    if (m.online && (m.since > this.since || (m.since === this.since && m.id > this.id))) void this.retire();
+    // An older host or a dead one's last will overwrote us: say again that we run the room.
+    else if (this.announced) void this.bus.publish(topics.host(this.o.code), this.msg(true), true);
+  }
+
+  onUp(pid: string, m: UpMsg, via: Via) {
+    if (this.retired || !m || typeof m !== 'object') return;
+    if (m.k === 'i' && Array.isArray(m.in)) {
+      if (!this.sim.players.has(pid) && this.presence.has(pid)) this.sim.add(pid, this.saved.get(pid));
+      this.sim.input(pid, m.in);
+    } else if (m.k === 'p') this.send(pid, { k: 'o', c: m.c }, via);
+    else if (m.k === 'st') this.stats.set(pid, { via: m.via, route: m.route, rttRtc: m.rttRtc, rttMqtt: m.rttMqtt });
+  }
+
+  private send(pid: string, m: DownMsg, via: Via) {
+    if (via === 'local') this.local?.deliver(m);
+    else if (via === 'rtc') {
+      const dc = this.peers.get(pid)?.dc;
+      if (dc?.readyState === 'open') dc.send(JSON.stringify(m));
+    } else this.bus.fast(topics.dnTo(this.o.code, pid), m);
+  }
+
+  private async onSig(from: string, m: SigMsg) {
+    if (this.retired || typeof RTCPeerConnection === 'undefined' || !m?.sdp || m.sdp.type !== 'offer') return;
+    this.peers.get(from)?.pc.close();
+    const pc = new RTCPeerConnection({ iceServers: iceServers(this.o.turn) });
+    const peer: Peer = { sid: m.sid, pc, dc: null, route: null };
+    this.peers.set(from, peer);
+    const drop = () => {
+      if (this.peers.get(from) !== peer) return;
+      this.peers.delete(from);
+      pc.close();
+      this.changed();
+    };
+    pc.ondatachannel = (e) => {
+      const dc = e.channel;
+      peer.dc = dc;
+      dc.onmessage = (ev) => {
+        try {
+          this.onUp(from, JSON.parse(ev.data as string) as UpMsg, 'rtc');
+        } catch {
+          /* malformed */
+        }
+      };
+      dc.onopen = () => {
+        this.changed();
+        void routeInfo(pc).then((r) => (peer.route = r));
+      };
+      dc.onclose = drop;
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') drop();
+    };
+    try {
+      await pc.setRemoteDescription(m.sdp);
+      await pc.setLocalDescription(await pc.createAnswer());
+      await gathered(pc);
+      if (this.peers.get(from) !== peer) return;
+      await this.bus.publish(topics.sig(this.o.code, from, this.id), { sid: m.sid, sdp: pc.localDescription!.toJSON() } satisfies SigMsg);
+    } catch {
+      drop();
+    }
+  }
+
+  private hasDirect(pid: string): boolean {
+    return this.peers.get(pid)?.dc?.readyState === 'open';
+  }
+
+  /** Someone online has neither a direct link nor this tab. */
+  private needsBroker(): boolean {
+    for (const [pid, p] of this.presence) if (p.online && pid !== this.local?.pid && !this.hasDirect(pid)) return true;
+    return false;
+  }
+
+  /** Runs the ticks that are due; a late timer catches up a little, a long stall is skipped. */
+  private pump() {
+    if (this.retired) return;
+    const now = performance.now();
+    const due = Math.floor((now - this.t0) / TICK_MS);
+    for (let k = 0; this.done < due && k < 5; k++, this.done++) this.tick();
+    this.done = due;
+    if (now - this.secondAt >= 1000) {
+      this.tickRate = Math.round((this.ticksThisSecond * 1000) / (now - this.secondAt));
+      this.ticksThisSecond = 0;
+      this.secondAt = now;
+      this.housekeeping();
+    }
+  }
+
+  private tick() {
+    this.ticksThisSecond++;
+    const sim = this.sim;
+    sim.tick();
+    const snap = sim.snapshot(performance.now());
+    const json = JSON.stringify(snap);
+    for (const p of this.peers.values())
+      if (p.dc?.readyState === 'open' && p.dc.bufferedAmount < 65536) p.dc.send(json);
+    this.local?.deliver(snap);
+    if (sim.n % BROKER_EVERY === 0 && this.needsBroker()) this.bus.fast(topics.dn(this.o.code), snap);
+    if (sim.n % 150 === 0) this.savePositions();
+  }
+
+  private housekeeping() {
+    const now = Date.now();
+    for (const [pid, at] of this.offlineAt)
+      if (now - at > DROP_AFTER_MS) {
+        this.sim.remove(pid);
+        this.offlineAt.delete(pid);
+      }
+    for (const p of this.peers.values()) if (p.dc?.readyState === 'open') void routeInfo(p.pc).then((r) => (p.route = r));
+    this.changed();
+  }
+
+  private savePositions() {
+    for (const [pid, x, y] of this.sim.positions()) this.saved.set(pid, { x, y });
+    void this.bus.publish(topics.pos(this.o.code), { v: 2, ps: [...this.saved].map(([pid, p]) => [pid, p.x, p.y]) } satisfies PosMsg, true).catch(() => {});
+  }
+
+  rows(): PlayerRow[] {
+    const pids = new Set([...this.sim.players.keys()]);
+    for (const [pid, p] of this.presence) if (p.online) pids.add(pid);
+    return [...pids].map((pid) => {
+      const p = this.presence.get(pid);
+      return {
+        pid,
+        name: p?.name ?? '?',
+        color: p?.color ?? 7,
+        online: !!p?.online,
+        via: pid === this.local?.pid ? 'local' : this.hasDirect(pid) ? 'rtc' : 'mqtt',
+        route: this.peers.get(pid)?.route ?? null,
+        stats: this.stats.get(pid) ?? null,
+      };
+    });
+  }
+
+  private shutdown() {
+    this.retired = true;
+    this.stopTicker?.();
+    this.stopTicker = null;
+    for (const p of this.peers.values()) p.pc.close();
+    this.peers.clear();
+  }
+
+  /** Another host took over: leave quietly (a clean disconnect does not fire the last will). */
+  private async retire() {
+    this.shutdown();
+    this.changed();
+    this.onRetire?.();
+    await this.bus.end();
+  }
+
+  /** Stops on purpose: saves positions and marks the room as without a host. */
   async stop(): Promise<void> {
     if (this.retired) return;
-    this.retired = true;
-    await this.bus.publish(topics.host(this.code), { id: this.id, online: false } satisfies HostMsg, true);
-  }
-
-  /** Seats a player controls right now. */
-  seatsOf(pid: string): HeroId[] {
-    return HERO_ORDER.filter((id) => this.room.seats[id] === pid);
+    this.savePositions();
+    this.shutdown();
+    this.changed();
+    try {
+      await this.bus.publish(topics.host(this.o.code), this.msg(false), true);
+    } finally {
+      await this.bus.end();
+    }
   }
 }
 
-export function isRoom(p: unknown): p is RoomState {
-  return !!p && typeof p === 'object' && (p as RoomState).v === 1 && 'seats' in p;
+/**
+ * Ticks from a worker: timers in a background tab are throttled to once a
+ * second or less, a worker's are not, so a host page keeps running while the
+ * laptop shows something else.
+ */
+function startTicker(fn: () => void): () => void {
+  try {
+    const url = URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${Math.floor(TICK_MS / 2)});`], { type: 'text/javascript' }));
+    const w = new Worker(url);
+    URL.revokeObjectURL(url);
+    w.onmessage = fn;
+    return () => w.terminate();
+  } catch {
+    const t = setInterval(fn, Math.floor(TICK_MS / 2));
+    return () => clearInterval(t);
+  }
 }

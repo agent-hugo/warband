@@ -1,51 +1,42 @@
 import qrcode from 'qrcode-generator';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ENCOUNTERS, HEROES, HERO_ORDER } from '../engine/content';
-import { allReady, newGame, resolveRound } from '../engine/engine';
-import type { GameState, HeroId } from '../engine/types';
-import { RoomClient, type ClientView } from '../net/client';
-import { Host } from '../net/host';
-import { Bus } from '../net/mqtt';
-import {
-  applyGameOp,
-  normalizeRoom,
-  randomId,
-  randomRoomCode,
-  topics,
-  type GameOp,
-  type HostMsg,
-  type RoomState,
-} from '../net/protocol';
-import { GameView, type Playback } from './GameView';
-import { Help } from './Help';
+import type { Pose } from '../game/predict';
+import { Host, type PlayerRow } from '../net/host';
+import { COLORS, normalizeRoom, randomRoomCode, type PresenceMsg } from '../net/protocol';
+import { routeLabel } from '../net/rtc';
+import { Session, type SessionInfo } from '../net/session';
 import { decodeInvite, inviteHash } from './invite';
+import { Joystick } from './joystick';
+import { Renderer, type Who } from './render';
 import { settings } from './storage';
 
-const STEP_MS = 700;
+const REPO = 'https://github.com/agent-hugo/warband';
 
-type Route = { page: 'home' } | { page: 'local' } | { page: 'room'; code: string } | { page: 'host'; code: string };
+type Route = { page: 'home'; code?: string } | { page: 'play'; code: string } | { page: 'host'; code: string };
 
-/**
- * Reads the hash. An invite (`i=<base64url>` with room and token, or a plain
- * `t=`) saves the token and is replaced by a plain `r=` in the address.
- */
+/** Reads the hash; an invite (`i=` with room and token) saves the token and becomes a plain `r=`. */
 function parseRoute(): Route {
   const h = new URLSearchParams(location.hash.slice(1));
   const inv = decodeInvite(h.get('i'));
-  const t = inv.token ?? h.get('t');
-  if (t) settings.token = t;
-  if (h.has('i') || h.has('t')) {
+  if (inv.token) settings.token = inv.token;
+  if (h.has('i')) {
     if (inv.room) h.set('r', inv.room);
     h.delete('i');
-    h.delete('t');
     history.replaceState(null, '', `${location.pathname}${location.search}#${h.toString()}`);
   }
-  if (h.has('local')) return { page: 'local' };
-  const r = normalizeRoom(h.get('r') ?? '');
-  if (r) return { page: 'room', code: r };
   const host = normalizeRoom(h.get('host') ?? '');
   if (host) return { page: 'host', code: host };
+  const r = normalizeRoom(h.get('r') ?? '');
+  if (r) return settings.name && settings.token ? { page: 'play', code: r } : { page: 'home', code: r };
   return { page: 'home' };
+}
+
+function inviteUrl(code: string): string {
+  return `${location.origin}${location.pathname}#${inviteHash(code, settings.token)}`;
+}
+
+function cfg() {
+  return { url: settings.brokerUrl, token: settings.token };
 }
 
 export function App() {
@@ -55,537 +46,365 @@ export function App() {
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
-  const [showHelp, setShowHelp] = useState(false);
-
-  return (
-    <div class="app">
-      <header>
-        <div>
-          <a href="#" class="logo">Warband</a>
-          {route.page === 'room' && <> · комната <b>{route.code}</b></>}
-          {route.page === 'host' && <> · хост <b>{route.code}</b></>}
-          {route.page === 'local' && <> · один экран</>}
-        </div>
-        <div class="hdr-btns">
-          <button class={showHelp ? 'on' : ''} onClick={() => setShowHelp(!showHelp)}>?</button>
-        </div>
-      </header>
-      {showHelp && <Help />}
-      {route.page === 'home' && <Home />}
-      {route.page === 'local' && <Local />}
-      {route.page === 'room' && <NetRoom key={route.code} code={route.code} />}
-      {route.page === 'host' && <HostPage key={route.code} code={route.code} />}
-    </div>
-  );
+  if (route.page === 'play') return <Play key={route.code} code={route.code} />;
+  if (route.page === 'host') return <HostPage key={route.code} code={route.code} />;
+  return <Home code={route.code} />;
 }
 
 // ───────── главная ─────────
 
-function Home() {
+function Home({ code: initial }: { code?: string }) {
   const [name, setName] = useState(settings.name);
+  const [color, setColor] = useState(settings.color);
   const [token, setToken] = useState(settings.token);
-  const [code, setCode] = useState(settings.lastRoom);
-  const net = !!token.trim();
+  const [code, setCode] = useState(initial ?? settings.lastRoom);
+  const [broker, setBroker] = useState(settings.brokerUrl);
+  const [turn, setTurn] = useState(settings.turn ?? { url: '', user: '', pass: '' });
+  const ok = !!token.trim();
   const go = (hash: string) => {
     settings.name = name;
+    settings.color = color;
     settings.token = token;
+    settings.brokerUrl = broker;
+    settings.turn = turn.url.trim() ? turn : null;
     location.hash = hash;
   };
   return (
-    <div class="panel home">
-      <h3>Игра по сети</h3>
-      <label>
-        Ваше имя
-        <input value={name} onInput={(e) => setName(e.currentTarget.value)} placeholder="Как вас зовут" />
-      </label>
-      <label>
-        Токен брокера
-        <input value={token} type="password" onInput={(e) => setToken(e.currentTarget.value)} placeholder="придёт в ссылке-приглашении" />
-      </label>
-      <div class="row">
-        <input class="code" value={code} onInput={(e) => setCode(normalizeRoom(e.currentTarget.value))} placeholder="КОД" />
-        <button class="primary" disabled={!net || !name.trim() || !code} onClick={() => go(`r=${code}`)}>
-          Войти в комнату
-        </button>
-      </div>
-      <div class="row">
-        <button disabled={!net} onClick={() => go(`host=${randomRoomCode()}`)}>
-          🖥 Новая комната: хост-страница
-        </button>
-        <button disabled={!net || !name.trim()} onClick={() => go(`r=${randomRoomCode()}`)}>
-          📱 Новая комната с этого телефона
-        </button>
+    <div class="page">
+      <h1>Warband</h1>
+      <p class="muted">
+        Проверка игры в реальном времени: телефоны ходят человечками по общей карте. Связь с хостом — напрямую через
+        WebRTC, а если не вышло — через MQTT-брокер.
+      </p>
+      <div class="panel">
+        <label>
+          Имя
+          <input value={name} maxLength={16} onInput={(e) => setName(e.currentTarget.value)} placeholder="Как вас зовут" />
+        </label>
+        <div class="swatches">
+          {COLORS.map((c, i) => (
+            <button class={`swatch ${i === color ? 'on' : ''}`} style={{ background: c }} onClick={() => setColor(i)} aria-label={`цвет ${i + 1}`} />
+          ))}
+        </div>
+        <label>
+          Токен брокера
+          <input value={token} type="password" onInput={(e) => setToken(e.currentTarget.value)} placeholder="придёт в ссылке-приглашении" />
+        </label>
+        <div class="row">
+          <input class="code" value={code} onInput={(e) => setCode(normalizeRoom(e.currentTarget.value))} placeholder="КОД" />
+          <button class="primary" disabled={!ok || !name.trim() || !code} onClick={() => go(`r=${code}`)}>
+            Войти
+          </button>
+        </div>
+        <div class="row">
+          <button disabled={!ok || !name.trim()} onClick={() => go(`r=${randomRoomCode()}`)}>
+            📱 Новая комната
+          </button>
+          <button disabled={!ok} onClick={() => go(`host=${code || randomRoomCode()}`)}>
+            💻 Хост-страница{code ? ` для ${code}` : ''}
+          </button>
+        </div>
+        <p class="muted small">
+          Хостом станет телефон первого вошедшего, если хоста нет. Хост-страница на ноутбуке надёжнее: телефон с
+          погашенным экраном перестаёт считать игру, и хост переходит к другому.
+        </p>
+        <details>
+          <summary>Дополнительно</summary>
+          <label>
+            Брокер
+            <input value={broker} onInput={(e) => setBroker(e.currentTarget.value)} />
+          </label>
+          <p class="muted small">TURN-сервер нужен, только если телефоны не соединяются напрямую (мобильный интернет за NAT оператора).</p>
+          <label>
+            TURN
+            <input value={turn.url} placeholder="turn:host:3478" onInput={(e) => setTurn({ ...turn, url: e.currentTarget.value })} />
+          </label>
+          <div class="row">
+            <input value={turn.user} placeholder="логин" onInput={(e) => setTurn({ ...turn, user: e.currentTarget.value })} />
+            <input value={turn.pass} type="password" placeholder="пароль" onInput={(e) => setTurn({ ...turn, pass: e.currentTarget.value })} />
+          </div>
+        </details>
       </div>
       <p class="muted small">
-        Хост-страница считает игру: откройте её на ноутбуке и покажите QR-код игрокам. Если хоста нет, любой телефон
-        может запустить его у себя.
+        Исходники: <a href={REPO} target="_blank" rel="noopener">{REPO.replace('https://', '')}</a>
       </p>
-      <h3>Без сети</h3>
-      <button onClick={() => (location.hash = 'local')}>Все герои на одном экране</button>
     </div>
   );
 }
 
-// ───────── розыгрыш по шагам ─────────
+// ───────── общее ─────────
 
-function useStepTimer(play: Playback | null, next: (p: Playback | null) => void) {
-  useEffect(() => {
-    if (!play) return;
-    const t = window.setTimeout(() => next(play.i + 1 < play.steps.length ? { ...play, i: play.i + 1 } : null), STEP_MS);
-    return () => clearTimeout(t);
-  }, [play]);
-}
-
-/** Plays a new resolution once; the one already there when the page opened is not replayed. */
-function usePlayback(anim: RoomState['anim'] | undefined, ready: boolean) {
-  const seen = useRef<number | undefined>(undefined);
-  const [play, setPlay] = useState<Playback | null>(null);
-  const id = anim?.id ?? 0;
-  useEffect(() => {
-    if (!ready) return;
-    if (seen.current === undefined) seen.current = id;
-    else if (id !== seen.current) {
-      seen.current = id;
-      setPlay(anim && anim.steps.length ? { steps: anim.steps, i: 0 } : null);
-    }
-  }, [id, ready]);
-  useStepTimer(play, setPlay);
-  return { play, skip: () => setPlay(null) };
-}
-
-// ───────── один экран ─────────
-
-const SAVE_KEY = 'warband-proto-v1';
-
-function Local() {
-  const [game, setGame] = useState<GameState>(() => {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (raw) return JSON.parse(raw) as GameState;
-    } catch {
-      /* new game */
-    }
-    return newGame();
-  });
-  const [play, setPlay] = useState<Playback | null>(null);
-  useEffect(() => localStorage.setItem(SAVE_KEY, JSON.stringify(game)), [game]);
-  useStepTimer(play, setPlay);
-
-  function send(op: GameOp): string | null {
-    const s = structuredClone(game);
-    const err = applyGameOp(s, op);
-    if (err) return err;
-    if (allReady(s)) {
-      const { state, steps } = resolveRound(s);
-      setGame(state);
-      if (steps.length) setPlay({ steps, i: 0 });
-    } else setGame(s);
-    return null;
-  }
-
-  return (
-    <>
-      <div class="row right">
-        <select
-          value=""
-          onChange={(e) => {
-            const v = e.currentTarget.value;
-            if (v !== '' && confirm('Начать заново?')) {
-              setPlay(null);
-              setGame(newGame(Date.now(), Number(v)));
-            }
-          }}
-        >
-          <option value="">Заново…</option>
-          {ENCOUNTERS.map((x, i) => (
-            <option value={i}>{i === 0 ? 'Новая игра' : `С боя ${i + 1}: ${x.name}`}</option>
-          ))}
-        </select>
-      </div>
-      <GameView
-        game={game}
-        play={play}
-        onSkip={() => setPlay(null)}
-        canControl={() => true}
-        send={send}
-        onNewGame={() => setGame(newGame())}
-        autoNext
-      />
-    </>
-  );
-}
-
-// ───────── игрок по сети ─────────
-
-function useClient(code: string, name: string): [RoomClient, ClientView] {
-  const client = useMemo(
-    () => new RoomClient({ url: settings.brokerUrl, token: settings.token }, code, settings.playerId, name),
-    [code, name],
-  );
-  const [view, setView] = useState(client.view);
-  useEffect(() => {
-    const off = client.subscribe(() => setView(client.view));
-    const vis = () => client.announce(document.visibilityState === 'visible');
-    document.addEventListener('visibilitychange', vis);
-    const bye = () => client.announce(false);
-    window.addEventListener('pagehide', bye);
-    return () => {
-      off();
-      document.removeEventListener('visibilitychange', vis);
-      window.removeEventListener('pagehide', bye);
-      void client.close();
-    };
-  }, [client]);
-  return [client, view];
-}
-
-function NetRoom({ code }: { code: string }) {
-  const [name, setName] = useState(settings.name);
-  if (!settings.token) return <NeedToken />;
-  if (!name) return <AskName onDone={setName} />;
-  return <NetRoomIn code={code} name={name} />;
-}
-
-function NeedToken() {
-  return (
-    <div class="panel">
-      <p>Нужен токен брокера: откройте ссылку-приглашение (QR на хост-странице) или введите токен на главной.</p>
-      <a href="#">На главную</a>
-    </div>
-  );
-}
-
-function AskName({ onDone }: { onDone: (n: string) => void }) {
-  const [v, setV] = useState('');
-  return (
-    <div class="panel home">
-      <label>
-        Как вас зовут?
-        <input value={v} onInput={(e) => setV(e.currentTarget.value)} autoFocus />
-      </label>
-      <button
-        class="primary"
-        disabled={!v.trim()}
-        onClick={() => {
-          settings.name = v;
-          onDone(v.trim());
-        }}
-      >
-        Дальше
-      </button>
-    </div>
-  );
-}
-
-function NetRoomIn({ code, name }: { code: string; name: string }) {
-  const [client, view] = useClient(code, name);
-  const pid = client.pid;
-  const room = view.room;
-  const [localHost, setLocalHost] = useState<LocalHost | null>(null);
-  const hostOnline = !!view.host?.online;
-  const [playFor, setPlayFor] = useState<HeroId[]>([]);
-  const { play, skip } = usePlayback(room?.anim, !!room);
-  useEffect(() => {
-    settings.lastRoom = code;
-  }, [code]);
-  useEffect(() => () => void localHost?.stop(), [localHost]);
-
-  // Новая комната (ни состояния, ни хоста) — хост поднимается на этом телефоне
-  const hosting = useRef(false);
-  const hostHere = () => {
-    if (hosting.current) return;
-    hosting.current = true;
-    startLocalHost(code).then(setLocalHost, () => (hosting.current = false));
-  };
-  useEffect(() => {
-    if (!view.connected) return;
-    const t = setTimeout(() => {
-      if (!client.view.room && !client.view.host?.online) hostHere();
-    }, 1500);
-    return () => clearTimeout(t);
-  }, [view.connected]);
-
-  const ownerOnline = (id: HeroId) => {
-    const o = room?.seats[id];
-    return !!o && !!view.presence[o]?.online;
-  };
-  const canControl = (id: HeroId) => room?.seats[id] === pid || (playFor.includes(id) && !ownerOnline(id));
-  const who = (p: string | null | undefined) => (p ? (view.presence[p]?.name ?? room?.names[p] ?? '?') : '');
-
-  const sleeping = room?.game
-    ? [...new Set(HERO_ORDER.map((id) => room.seats[id]).filter((p): p is string => !!p && p !== pid && !view.presence[p]?.online))]
-    : [];
-
-  function send(op: GameOp): string | null {
-    if (!room?.game) return 'Нет игры';
-    if (!hostOnline) return 'Хост не в сети';
-    const err = applyGameOp(structuredClone(room.game), op);
-    if (err) return err;
-    client.send(op);
-    return null;
-  }
-
-  const seatNote = (id: HeroId) => {
-    const o = room?.seats[id];
-    if (o === pid) return null;
-    if (ownerOnline(id)) return <div class="note">Играет {who(o)}</div>;
-    const on = playFor.includes(id);
-    return (
-      <div class="note sleep">
-        😴 {who(o) || 'Никто'} не в сети — разбудите!{' '}
-        <button onClick={() => setPlayFor(on ? playFor.filter((x) => x !== id) : [...playFor, id])}>
-          {on ? 'Вернуть ход' : 'Сыграть за него'}
-        </button>
-      </div>
-    );
-  };
-
-  return (
-    <>
-      <div class="status small">
-        <span class={view.connected ? 'ok' : 'bad'}>● {view.connected ? 'на связи' : 'нет связи…'}</span>
-        {' · '}
-        <span class={hostOnline ? 'ok' : 'bad'}>
-          хост {hostOnline ? (localHost && !localHost.host.stopped ? 'на этом телефоне' : 'в сети') : 'не в сети'}
-        </span>
-      </div>
-      {!hostOnline && view.connected && room && (
-        <div class="note warn">
-          Хост не в сети. <button onClick={hostHere}>Запустить хост на этом телефоне</button>
-        </div>
-      )}
-      {sleeping.length > 0 && <div class="note sleep">😴 {sleeping.map(who).join(', ')} — не в сети, разбудите!</div>}
-      {!room && <p class="muted">Загрузка комнаты…</p>}
-      {room && !room.game && <Lobby code={code} room={room} view={view} pid={pid} client={client} />}
-      {room?.game && (
-        <>
-          <GameView
-            game={room.game}
-            play={play}
-            onSkip={skip}
-            canControl={canControl}
-            send={send}
-            err={view.error}
-            seatNote={seatNote}
-            onNewGame={() => client.send({ op: 'lobby' })}
-          />
-          <div class="row right">
-            <button class="link" onClick={() => confirm('Вернуться в лобби? Текущая игра закончится.') && client.send({ op: 'lobby' })}>
-              ⏏ В лобби
-            </button>
-          </div>
-        </>
-      )}
-    </>
-  );
-}
-
-function Lobby(p: { code: string; room: RoomState; view: ClientView; pid: string; client: RoomClient }) {
-  const { room, view, pid, client } = p;
-  const [battle, setBattle] = useState(0);
-  const full = HERO_ORDER.every((id) => room.seats[id]);
-  const seated = Object.values(room.seats);
-  const others = Object.entries(view.presence).filter(([id, x]) => x.online && !seated.includes(id));
-  return (
-    <div class="panel">
-      <h3>Лобби: выберите героев</h3>
-      <p class="muted small">Один игрок может взять нескольких героев.</p>
-      {view.error && <div class="err">{view.error}</div>}
-      {HERO_ORDER.map((id) => {
-        const d = HEROES[id];
-        const o = room.seats[id];
-        const on = !!o && !!view.presence[o]?.online;
-        return (
-          <div class="seat">
-            <div>
-              <b>
-                {d.icon} {d.name}
-              </b>{' '}
-              <span class="muted small">{d.passive}</span>
-              <div class="small">
-                {o ? (
-                  <>
-                    {o === pid ? 'Вы' : (view.presence[o]?.name ?? room.names[o])} {on ? '' : '😴'}
-                  </>
-                ) : (
-                  <span class="muted">свободно</span>
-                )}
-              </div>
-            </div>
-            {o === pid ? (
-              <button onClick={() => client.send({ op: 'seat', seat: id, take: false })}>Освободить</button>
-            ) : (
-              <button disabled={on} onClick={() => client.send({ op: 'seat', seat: id, take: true })}>
-                Взять
-              </button>
-            )}
-          </div>
-        );
-      })}
-      {others.length > 0 && <p class="small muted">Без героя: {others.map(([, x]) => x.name).join(', ')}</p>}
-      <div class="row">
-        <select value={battle} onChange={(e) => setBattle(Number(e.currentTarget.value))}>
-          {ENCOUNTERS.map((x, i) => (
-            <option value={i}>{i === 0 ? 'С начала' : `С боя ${i + 1}: ${x.name}`}</option>
-          ))}
-        </select>
-        <button class="primary" disabled={!full} onClick={() => client.send({ op: 'start', battle })}>
-          Начать
-        </button>
-      </div>
-      <Invite code={p.code} />
-    </div>
-  );
-}
-
-/** Clipboard API where allowed (https, localhost), else the old selection copy. */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    return ok;
-  }
+function Qr({ text }: { text: string }) {
+  const svg = useMemo(() => {
+    const q = qrcode(0, 'M');
+    q.addData(text);
+    q.make();
+    return q.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  }, [text]);
+  return <div class="qr" dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 
 function Invite({ code }: { code: string }) {
-  const [withToken, setWithToken] = useState(true);
-  const [copied, setCopied] = useState('');
-  useEffect(() => {
-    if (!copied) return;
-    const t = setTimeout(() => setCopied(''), 1500);
-    return () => clearTimeout(t);
-  }, [copied]);
-  const url = `${location.origin}${location.pathname}#${inviteHash(code, withToken ? settings.token : undefined)}`;
-  const svg = useMemo(() => {
-    const q = qrcode(0, 'M');
-    q.addData(url);
-    q.make();
-    return q.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
-  }, [url]);
+  const url = inviteUrl(code);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      prompt('Скопируйте ссылку', url);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <div class="invite">
-      <div class="qr" dangerouslySetInnerHTML={{ __html: svg }} />
-      <div>
-        <div>
-          Комната <b class="big">{code}</b>
-        </div>
-        <label class="small">
-          <input type="checkbox" checked={withToken} onChange={(e) => setWithToken(e.currentTarget.checked)} /> ссылка с токеном
-        </label>
-        <div>
-          <button onClick={() => void copyText(url).then((ok) => setCopied(ok ? 'Скопировано' : 'Не удалось'))}>
-            {copied || 'Скопировать ссылку'}
-          </button>
-        </div>
-      </div>
+      <Qr text={url} />
+      <button onClick={copy}>{copied ? 'Скопировано' : 'Скопировать ссылку'}</button>
+      <p class="muted small">В ссылке токен брокера: отправляйте только своим.</p>
     </div>
   );
 }
 
-// ───────── хост ─────────
+const ms = (v: number | null) => (v === null ? '—' : `${v} мс`);
 
-interface LocalHost {
-  host: Host;
-  stop: () => Promise<void>;
+function viaText(row: Pick<PlayerRow, 'via' | 'route'>): string {
+  if (row.via === 'local') return 'хост на этом устройстве';
+  if (row.via === 'rtc') return `WebRTC, ${row.route ? routeLabel(row.route.local, row.route.remote) : 'напрямую'}`;
+  return 'через брокер';
 }
 
-async function startLocalHost(code: string): Promise<LocalHost> {
-  const id = randomId();
-  const bus = new Bus(
-    { url: settings.brokerUrl, token: settings.token },
-    { will: { topic: topics.host(code), payload: { id, online: false } satisfies HostMsg } },
-  );
-  await bus.ready();
-  const host = new Host(bus, code, id);
-  await host.start();
-  return {
-    host,
-    stop: async () => {
-      await host.stop();
-      await bus.end();
-    },
+function useWakeLock() {
+  useEffect(() => {
+    let lock: { release(): Promise<void> } | null = null;
+    const take = async () => {
+      try {
+        if (document.visibilityState === 'visible') lock = await (navigator as any).wakeLock?.request('screen');
+      } catch {
+        /* not allowed */
+      }
+    };
+    void take();
+    document.addEventListener('visibilitychange', take);
+    return () => {
+      document.removeEventListener('visibilitychange', take);
+      void lock?.release().catch(() => {});
+    };
+  }, []);
+}
+
+function whoFrom(presence: Map<string, PresenceMsg>) {
+  return (pid: string): Who => {
+    const p = presence.get(pid);
+    return { name: p?.name ?? '?', color: p?.color ?? 7, online: !!p?.online };
   };
 }
 
-function HostPage({ code }: { code: string }) {
-  const [lh, setLh] = useState<LocalHost | null>(null);
-  const [err, setErr] = useState('');
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (!settings.token) return;
-    let alive = true;
-    let started: LocalHost | null = null;
-    startLocalHost(code).then(
-      (x) => {
-        started = x;
-        if (alive) setLh(x);
-        else void x.stop();
-      },
-      (e: unknown) => setErr(e instanceof Error ? e.message : String(e)),
-    );
-    const bye = () => void started?.stop();
-    window.addEventListener('pagehide', bye);
-    return () => {
-      alive = false;
-      window.removeEventListener('pagehide', bye);
-      void started?.stop();
-    };
-  }, [code]);
-  useEffect(() => lh?.host.subscribe(() => setTick((t) => t + 1)), [lh]);
-  const room = lh?.host.room;
-  const { play, skip } = usePlayback(room?.anim, !!room);
+// ───────── игрок ─────────
 
-  if (!settings.token) return <NeedToken />;
-  if (err) return <div class="err">Ошибка подключения: {err}</div>;
-  if (!lh || !room) return <p class="muted">Подключение…</p>;
-  if (lh.host.stopped)
-    return (
-      <div class="note warn">
-        Игру этой комнаты теперь считает другой хост. <button onClick={() => location.reload()}>Забрать обратно</button>
-      </div>
-    );
-  const presence = lh.host.presence;
-  const name = (p: string | null) => (p ? (presence.get(p)?.name ?? room.names[p] ?? '?') : '—');
+function Play({ code }: { code: string }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const session = useMemo(() => {
+    settings.lastRoom = code;
+    return new Session({ cfg: cfg(), code, pid: settings.playerId, name: settings.name, color: settings.color, turn: settings.turn });
+  }, [code]);
+  const [info, setInfo] = useState<SessionInfo>(() => session.info());
+  const [menu, setMenu] = useState(false);
+  const [ghost, setGhost] = useState(false);
+  const ghostRef = useRef(ghost);
+  ghostRef.current = ghost;
+  const [, redraw] = useState(0);
+  const [hint, setHint] = useState(true);
+  useWakeLock();
+
+  useEffect(() => {
+    const el = canvas.current!;
+    const r = new Renderer(el);
+    const joy = new Joystick(el);
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      session.frame(now, joy.dir());
+      const { all, ghost: g } = session.poses(now, now - last);
+      last = now;
+      r.draw(now, all, whoFrom(session.presence), { follow: session.o.pid, me: session.o.pid, ghost: ghostRef.current ? g : null, minimap: true });
+      joy.draw(el.getContext('2d')!, Math.min(window.devicePixelRatio || 1, 3));
+      if (joy.used) setHint(false);
+    };
+    raf = requestAnimationFrame(loop);
+    const t = setInterval(() => setInfo(session.info()), 400);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearInterval(t);
+      joy.destroy();
+      void session.close();
+    };
+  }, [session]);
+
+  const status = !info.connected ? 'Подключение к брокеру…' : !info.host?.online ? 'Хоста нет — сейчас кто-то из игроков станет хостом…' : null;
+  const hostName = info.hosting ? 'этот телефон' : info.host?.online ? info.host.name || 'хост-страница' : '—';
+  const viaShort =
+    info.via === 'local'
+      ? '🏠 хост здесь'
+      : info.via === 'rtc'
+        ? `⚡ WebRTC${info.route ? `, ${info.route}` : ''}`
+        : info.via === 'mqtt'
+          ? `☁ брокер${info.rtc === 'connecting' ? ' (WebRTC подключается…)' : info.rtc === 'failed' && session.mode === 'auto' ? ' (WebRTC не вышел)' : ''}`
+          : '…';
+
   return (
-    <>
-      <div class="host-top">
-        <Invite code={code} />
-        <div class="panel host-seats">
-          {HERO_ORDER.map((id) => {
-            const o = room.seats[id];
-            return (
-              <div>
-                {HEROES[id].icon} {HEROES[id].name}: <b>{name(o)}</b> {o && (presence.get(o)?.online ? '🟢' : '😴')}
-              </div>
-            );
-          })}
-          <div class="muted small">
-            В комнате: {[...presence.values()].filter((x) => x.online).map((x) => x.name).join(', ') || 'никого'}
-          </div>
-          <div class="muted small">Не закрывайте эту страницу: она считает игру.</div>
+    <div class="play">
+      <canvas ref={canvas} class="world" />
+      <div class="hud">
+        <div>
+          <b>{code}</b> · {viaShort}
+        </div>
+        <div class="small">
+          RTT: WebRTC {ms(info.rttRtc)} · брокер {ms(info.rttMqtt)} · {info.snapRate} кадр/с
         </div>
       </div>
-      {room.game ? (
-        <GameView
-          game={room.game}
-          play={play}
-          onSkip={skip}
-          canControl={() => false}
-          send={() => 'Хост только показывает игру'}
-          onNewGame={() => {}}
-        />
-      ) : (
-        <p class="muted">Ждём, пока игроки займут героев и нажмут «Начать».</p>
+      <button class="menu-btn" onClick={() => setMenu(!menu)}>
+        ☰
+      </button>
+      {status && <div class="status">{status}</div>}
+      {hint && !status && <div class="hint">Коснитесь экрана и тяните в нужную сторону</div>}
+      {menu && (
+        <div class="menu" onPointerDown={(e) => e.stopPropagation()}>
+          <h3>Комната {code}</h3>
+          <p class="small">
+            Хост: <b>{hostName}</b>
+          </p>
+          <ul class="players">
+            {info.presence
+              .filter(([, p]) => p.online)
+              .map(([pid, p]) => (
+                <li>
+                  <span class="dot" style={{ background: COLORS[p.color] }} /> {p.name}
+                  {pid === session.o.pid ? ' (вы)' : ''}
+                </li>
+              ))}
+          </ul>
+          <h4>Опыты</h4>
+          <label class="check">
+            <input type="checkbox" checked={session.predict} onChange={(e) => ((session.predict = e.currentTarget.checked), redraw((x) => x + 1))} />
+            Предсказание: свой человечек идёт сразу, не дожидаясь хоста
+          </label>
+          <label class="check">
+            <input type="checkbox" checked={session.interp} onChange={(e) => ((session.interp = e.currentTarget.checked), redraw((x) => x + 1))} />
+            Сглаживание чужих: показывать их чуть в прошлом, между кадрами
+          </label>
+          <label class="check">
+            <input type="checkbox" checked={ghost} onChange={(e) => setGhost(e.currentTarget.checked)} />
+            Рамка: где вы сейчас у хоста
+          </label>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={session.mode === 'mqtt'}
+              disabled={info.hosting}
+              onChange={(e) => (session.setMode(e.currentTarget.checked ? 'mqtt' : 'auto'), redraw((x) => x + 1))}
+            />
+            Только брокер, без WebRTC
+          </label>
+          <p class="muted small">Поправок предсказания: {info.corrections}</p>
+          <div class="row">
+            <button disabled={info.hosting} onClick={() => void session.becomeHost()}>
+              Стать хостом
+            </button>
+            <button onClick={() => (location.hash = '')}>Выйти</button>
+          </div>
+          <h4>Позвать</h4>
+          <Invite code={code} />
+          <button class="close" onClick={() => setMenu(false)}>
+            Закрыть
+          </button>
+        </div>
       )}
-    </>
+    </div>
+  );
+}
+
+// ───────── хост-страница ─────────
+
+function HostPage({ code }: { code: string }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [gen, setGen] = useState(0);
+  const host = useMemo(() => new Host({ cfg: cfg(), code, name: '', turn: settings.turn }), [code, gen]);
+  const [rows, setRows] = useState<PlayerRow[]>([]);
+  const [state, setState] = useState<'starting' | 'running' | 'retired' | 'error'>('starting');
+
+  useEffect(() => {
+    let alive = true;
+    host.onRetire = () => alive && setState('retired');
+    host.start().then(
+      () => alive && !host.retired && setState('running'),
+      () => alive && setState('error'),
+    );
+    const el = canvas.current!;
+    const r = new Renderer(el);
+    let raf = 0;
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      const poses = new Map<string, Pose>();
+      for (const [pid, p] of host.sim.players) poses.set(pid, { x: p.x, y: p.y, dir: p.idle < 3 ? p.dir : -1 });
+      r.draw(now, poses, whoFrom(host.presence));
+    };
+    raf = requestAnimationFrame(loop);
+    const t = setInterval(() => setRows(host.rows()), 500);
+    const leave = () => void host.stop();
+    window.addEventListener('pagehide', leave);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      clearInterval(t);
+      window.removeEventListener('pagehide', leave);
+      void host.stop();
+    };
+  }, [host]);
+
+  return (
+    <div class="hostpage">
+      <canvas ref={canvas} class="world" />
+      <aside class="panel">
+        <h2>Комната {code}</h2>
+        {state === 'starting' && <p>Подключение к брокеру…</p>}
+        {state === 'error' && <p class="bad">Не удалось подключиться к брокеру. Проверьте токен на главной.</p>}
+        {state === 'retired' && (
+          <p class="bad">
+            Хостом стала другая страница или телефон.{' '}
+            <button onClick={() => (setState('starting'), setGen(gen + 1))}>Снова стать хостом</button>
+          </p>
+        )}
+        {state === 'running' && <p class="muted small">Хост работает: {host.tickRate} тактов/с. Вкладку можно оставить в фоне.</p>}
+        <table class="rows">
+          <thead>
+            <tr>
+              <th>Игрок</th>
+              <th>Связь</th>
+              <th>RTT WebRTC</th>
+              <th>RTT брокер</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr class={r.online ? '' : 'off'}>
+                <td>
+                  <span class="dot" style={{ background: COLORS[r.color] }} /> {r.name}
+                  {r.online ? '' : ' 💤'}
+                </td>
+                <td>{viaText(r)}</td>
+                <td>{ms(r.stats?.rttRtc ?? null)}</td>
+                <td>{ms(r.stats?.rttMqtt ?? null)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && <p class="muted">Пока никого. Отсканируйте код телефоном:</p>}
+        <Invite code={code} />
+        <p>
+          <button onClick={() => (location.hash = '')}>На главную</button>
+        </p>
+      </aside>
+    </div>
   );
 }

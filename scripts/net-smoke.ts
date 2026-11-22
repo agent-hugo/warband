@@ -1,88 +1,45 @@
 /**
- * End-to-end check over a real broker: a host, two players, one round.
- * Usage: MQTT_TOKEN=... npm run net-smoke
+ * Two players and a host over the broker only (Node has no WebRTC):
+ * the players walk, and their positions must agree with the host's.
+ *   MQTT_TOKEN=... npm run net-smoke
  */
-import { card, hero, validTargets } from '../src/engine/engine';
-import { RoomClient } from '../src/net/client';
+import { DIRS } from '../src/game/world';
 import { Host } from '../src/net/host';
-import { Bus } from '../src/net/mqtt';
-import { randomId, randomRoomCode, topics } from '../src/net/protocol';
+import { randomRoomCode } from '../src/net/protocol';
+import { Session } from '../src/net/session';
 
-const url = process.env.MQTT_URL || 'wss://mqtt.flespi.io';
 const token = process.env.MQTT_TOKEN;
-if (!token) {
-  console.error('MQTT_TOKEN is required');
-  process.exit(2);
-}
-const cfg = { url, token };
+if (!token) throw new Error('MQTT_TOKEN is not set');
+const cfg = { url: process.env.MQTT_URL || 'wss://mqtt.flespi.io', token };
 const code = `T${randomRoomCode()}`;
-const until = (what: string, ok: () => boolean, ms = 8000) =>
-  new Promise<void>((resolve, reject) => {
-    const t0 = Date.now();
-    const iv = setInterval(() => {
-      if (ok()) {
-        clearInterval(iv);
-        resolve();
-      } else if (Date.now() - t0 > ms) {
-        clearInterval(iv);
-        reject(new Error(`timeout: ${what}`));
-      }
-    }, 50);
-  });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const hid = randomId();
-const hbus = new Bus(cfg, { will: { topic: topics.host(code), payload: { id: hid, online: false } } });
-await hbus.ready();
-const host = new Host(hbus, code, hid);
+const host = new Host({ cfg, code, name: '', turn: null });
 await host.start();
-console.log('room', code, 'host up');
-
-const a = new RoomClient(cfg, code, 'pa', 'Аня');
-const b = new RoomClient(cfg, code, 'pb', 'Боря');
-await until('clients see room', () => !!a.view.room && !!b.view.room && !!a.view.host?.online);
-a.send({ op: 'seat', seat: 'guard', take: true });
-a.send({ op: 'seat', seat: 'blade', take: true });
-b.send({ op: 'seat', seat: 'mystic', take: true });
-await until('seats', () => b.view.room?.seats.mystic === 'pb' && b.view.room.seats.blade === 'pa' && b.view.room.seats.guard === 'pa');
-b.send({ op: 'seat', seat: 'guard', take: true }); // taken by an online player
-await until('refusal', () => !!b.view.error);
-console.log('refused as expected:', b.view.error);
-a.send({ op: 'start', battle: 0 });
-await until('game', () => !!b.view.room?.game);
-const g = b.view.room!.game!;
-for (const [cl, seat] of [[a, 'guard'], [a, 'blade'], [b, 'mystic']] as const) {
-  const h = hero(g, seat);
-  const c = h.hand.find((x) => card(x.id).cost <= 2)!;
-  const d = card(c.id);
-  cl.send({ op: 'card', seat, uid: c.uid, target: d.target === 'none' ? undefined : validTargets(g, h, d)[0] });
-  cl.send({ op: 'ready', seat, ready: true });
+const a = new Session({ cfg, code, pid: 'aaaa', name: 'A', color: 0, turn: null });
+const b = new Session({ cfg, code, pid: 'bbbb', name: 'B', color: 1, turn: null });
+const t0 = performance.now();
+let dir = 0;
+const loop = setInterval(() => {
+  const now = performance.now();
+  a.frame(now, dir);
+  b.frame(now, dir < 0 ? dir : (dir + DIRS / 2) % DIRS);
+}, 16);
+for (const [ms, d] of [[2000, 0], [2000, DIRS / 4], [1500, -1]] as const) {
+  dir = d;
+  await sleep(ms);
 }
-await until('round resolved', () => (b.view.room?.anim?.id ?? 0) === 1 && b.view.room!.game!.round === 2);
-console.log('round 1 resolved:', b.view.room!.anim!.steps.length, 'steps,', JSON.stringify(b.view.room).length, 'bytes');
-
-// b falls asleep; a plays for the mystic
-b.announce(false);
-await until('presence', () => host.presence.get('pb')?.online === false);
-a.send({ op: 'ready', seat: 'mystic', ready: true });
-await until('play for sleeping', () => hero(a.view.room!.game!, 'mystic').ready);
-console.log('played for a sleeping player');
-
-// takeover: a second host continues from the retained state
-const hid2 = randomId();
-const hbus2 = new Bus(cfg);
-await hbus2.ready();
-const host2 = new Host(hbus2, code, hid2);
-await host2.start();
-await until('old host retired', () => host.stopped);
-a.send({ op: 'ready', seat: 'guard', ready: true });
-await until('new host serves', () => hero(a.view.room!.game!, 'guard').ready);
-console.log('takeover ok, round', a.view.room!.game!.round);
-
-// clean up the retained topics of the test room
-await Promise.all([a.close(), b.close()]);
-await host2.stop();
-for (const t of [topics.state(code), topics.host(code), topics.presence(code, 'pa'), topics.presence(code, 'pb')])
-  await hbus2.publish(t, null, true);
-await Promise.all([hbus.end(), hbus2.end()]);
-console.log('OK');
+clearInterval(loop);
+await sleep(800);
+const sim = host.sim.players;
+for (const s of [a, b]) {
+  const hp = sim.get(s.o.pid);
+  const i = s.info();
+  console.log(s.o.name, 'host', hp && [hp.x, hp.y], 'predicted', s.pred.self, 'via', i.via, 'rtt', i.rttMqtt, 'ms, corrections', i.corrections);
+  if (!hp || !s.pred.self || hp.x !== s.pred.self.x || hp.y !== s.pred.self.y) throw new Error(`${s.o.name}: prediction differs from host`);
+}
+console.log('ok in', Math.round(performance.now() - t0), 'ms; host ticks/s', host.tickRate);
+await a.close();
+await b.close();
+await host.stop();
 process.exit(0);

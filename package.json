@@ -8,9 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "host": "tsx scripts/host.ts",
-    "net-smoke": "tsx scripts/net-smoke.ts",
-    "sim": "tsx scripts/sim.ts"
+    "net-smoke": "tsx scripts/net-smoke.ts"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.6",
