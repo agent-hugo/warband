@@ -289,7 +289,7 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
   const t = g.tag && n - g.tag[2] < 2 * TICK_HZ && g.ph === 'chase' ? g.tag : null;
   const lz = g.ph === 'chase' ? g.lz?.find(([pid]) => pid === me) : undefined;
   const runLeft = lz ? Math.ceil((RUN_OFF_TICKS - lz[2]) / TICK_HZ) : 0;
-  const seenOnMap = g.ph === 'chase' && (mine || !me) ? (g.lz ?? []).filter(([pid]) => exposed(g, pid, n)).map(([pid]) => name(pid)) : [];
+  const seenOnMap = g.ph === 'chase' && (mine || !me) ? (g.lz ?? []).filter(([pid]) => exposed(g, pid)).map(([pid]) => name(pid)) : [];
   return (
     <div class={`banner ${mine && g.ph !== 'wait' && g.ph !== 'end' ? 'it' : ''}`}>
       <div>{line}</div>
@@ -299,8 +299,8 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
       {t && <div class="small">{t[1] === me ? 'Вас осалили — теперь вы водите!' : `${name(t[1])} теперь водит`}</div>}
       {lz && (
         <div class="lazy">
-          {n < lz[1]
-            ? `⚠ Вы долго стоите! Через ${Math.ceil((lz[1] - n) / TICK_HZ)} с водящий увидит вас на миникарте — бегите!`
+          {lz[1] > 0
+            ? `⚠ Вы долго стоите! Побегайте ещё ${runLeft} с. Будете стоять — через ${Math.ceil(lz[1] / TICK_HZ)} с водящий увидит вас на миникарте`
             : `👁 Водящий видит вас на миникарте. Побегайте ещё ${runLeft} с`}
         </div>
       )}
@@ -388,7 +388,7 @@ function Play({ code }: { code: string }) {
     let raf = 0;
     let last = performance.now();
     let buzzed = session.game?.tag?.[2] ?? -1;
-    let warned = -1;
+    let warned = false;
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
       session.frame(now, joy.dir());
@@ -405,15 +405,15 @@ function Play({ code }: { code: string }) {
         fog: foggy(game) ? all.get(session.o.pid) : null,
         exposed:
           game?.it === session.o.pid && game.ph === 'chase'
-            ? new Set(game.lz?.filter(([pid]) => exposed(game, pid, session.gameN)).map(([pid]) => pid))
+            ? new Set(game.lz?.filter(([pid]) => exposed(game, pid)).map(([pid]) => pid))
             : undefined,
         touched: game?.tag ? { pid: game.tag[1], key: game.tag[2] } : null,
       });
       // A buzz when warned for standing still.
       const lz = game?.lz?.find(([pid]) => pid === session.o.pid);
-      if (lz && lz[1] !== warned) {
-        warned = lz[1];
-        navigator.vibrate?.([200, 100, 200]);
+      if (!!lz !== warned) {
+        warned = !!lz;
+        if (lz) navigator.vibrate?.([200, 100, 200]);
       }
       // A buzz when touched.
       const t = game?.tag;
@@ -467,7 +467,7 @@ function Play({ code }: { code: string }) {
         const g = info.game;
         const lz = g?.ph === 'chase' ? g.lz?.find(([pid]) => pid === session.o.pid) : undefined;
         // Before "it" sees you: the whole screen blinks; after: a red frame pulses.
-        return lz ? <div class={info.gameN < lz[1] ? 'flash' : 'flash seen'} /> : null;
+        return lz ? <div class={lz[1] > 0 ? 'flash' : 'flash seen'} /> : null;
       })()}
       {status && <div class="status">{status}</div>}
       {hint && !status && <div class="hint">Коснитесь экрана и тяните в нужную сторону</div>}

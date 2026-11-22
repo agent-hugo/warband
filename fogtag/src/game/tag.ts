@@ -29,10 +29,10 @@ export const END_TICKS = 8 * TICK_HZ;
 export const FREEZE_TICKS = 5 * TICK_HZ;
 /** A hider standing still this long in the chase is warned... */
 export const STILL_TICKS = 15 * TICK_HZ;
-/** ...and this long after the warning "it" sees them on the minimap, unless they move off first... */
-export const WARN_TICKS = 5 * TICK_HZ;
-/** ...until they have been moving this long (in all, since "it" saw them). */
+/** ...and has to run about this long (in all) to be let off... */
 export const RUN_OFF_TICKS = 5 * TICK_HZ;
+/** ...or "it" sees them on the minimap once they have stood this long since the warning. */
+export const WARN_TICKS = 5 * TICK_HZ;
 /** Centre to centre: the two boxes touch, plus a little for lag, half as much again (36 px). */
 export const TOUCH = (HALF * 2 + 6) * 1.5;
 /** Someone just out of sight stays in the snapshots this long, so they do not flicker at the edge. */
@@ -52,13 +52,13 @@ export interface TagState {
   tag: [string, string, number] | null;
   /** In 'wait': who the round waits for (no direct link yet). */
   wt?: string[];
-  /** Hiders who stood still too long: [pid, tick "it" starts to see them on the minimap, ticks run since "it" saw them]. */
+  /** Hiders who stood still too long: [pid, ticks they may still stand before "it" sees them on the minimap, ticks run since the warning]. */
   lz?: [string, number, number][];
 }
 
-/** Whether `pid` stands out on the minimap of "it" at tick `n`. */
-export function exposed(g: TagState | null | undefined, pid: string, n: number): boolean {
-  return !!g?.lz?.some(([id, at]) => id === pid && n >= at);
+/** Whether `pid` stands out on the minimap of "it". */
+export function exposed(g: TagState | null | undefined, pid: string): boolean {
+  return !!g?.lz?.some(([id, left]) => id === pid && left <= 0);
 }
 
 /** Speed of a player at tick `n` under state `g` (no game: normal). */
@@ -83,8 +83,8 @@ export class Tag {
   private last = new Map<string, Vec>();
   /** Ticks each hider has been standing still. */
   private still = new Map<string, number>();
-  /** Warned hiders: when "it" starts to see them, and how long they have run since. */
-  private lazy = new Map<string, { at: number; run: number }>();
+  /** Warned hiders: how long they may still stand, and how long they have run since the warning. */
+  private lazy = new Map<string, { left: number; run: number }>();
 
   constructor(private rnd: () => number = Math.random) {}
 
@@ -123,7 +123,7 @@ export class Tag {
     } else if (st.ph === 'chase') {
       this.itTicks.set(st.it, (this.itTicks.get(st.it) ?? 0) + 1);
       if (n >= st.fz) this.touch(n, ps);
-      this.watchStill(n, ps);
+      this.watchStill(ps);
       if (n >= st.end) {
         st.ph = 'end';
         st.end = n + END_TICKS;
@@ -141,7 +141,7 @@ export class Tag {
   }
 
   /** Who stands still too long, and who has run enough to be let off. */
-  private watchStill(n: number, ps: Map<string, Vec>) {
+  private watchStill(ps: Map<string, Vec>) {
     for (const [id, p] of ps) {
       const q = this.last.get(id);
       this.last.set(id, { x: p.x, y: p.y });
@@ -153,8 +153,9 @@ export class Tag {
       const moved = !q || q.x !== p.x || q.y !== p.y;
       const lz = this.lazy.get(id);
       if (lz) {
-        // Moving off before "it" sees them is enough; once seen, they must run a while.
-        if (moved && (n < lz.at || ++lz.run >= RUN_OFF_TICKS)) {
+        // Running pays the debt off; only standing brings "it" closer to seeing them.
+        if (!moved) lz.left = Math.max(0, lz.left - 1);
+        else if (++lz.run >= RUN_OFF_TICKS) {
           this.lazy.delete(id);
           this.still.set(id, 0);
         }
@@ -162,10 +163,10 @@ export class Tag {
       }
       const s = moved ? 0 : (this.still.get(id) ?? 0) + 1;
       this.still.set(id, s);
-      if (s >= STILL_TICKS) this.lazy.set(id, { at: n + WARN_TICKS, run: 0 });
+      if (s >= STILL_TICKS) this.lazy.set(id, { left: WARN_TICKS, run: 0 });
     }
     for (const id of this.lazy.keys()) if (!ps.has(id)) this.lazy.delete(id);
-    this.st.lz = [...this.lazy].map(([id, l]) => [id, l.at, l.run]);
+    this.st.lz = [...this.lazy].map(([id, l]) => [id, l.left, l.run]);
   }
 
   private touch(n: number, ps: Map<string, Vec>) {
@@ -219,7 +220,7 @@ export class Tag {
     for (const [id, p] of ps) {
       if (id === viewer) continue;
       if (sees(from, p)) mem.set(id, n);
-      if (n - (mem.get(id) ?? -Infinity) <= SEEN_GRACE || (viewer === this.st.it && exposed(this.st, id, n))) out.add(id);
+      if (n - (mem.get(id) ?? -Infinity) <= SEEN_GRACE || (viewer === this.st.it && exposed(this.st, id))) out.add(id);
     }
     return out;
   }

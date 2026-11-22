@@ -132,51 +132,53 @@ describe('prediction with roles', () => {
 });
 
 describe('standing still', () => {
-  it('warns a hider, shows them to "it" on the minimap, and lets them off after running', async () => {
-    const { STILL_TICKS, RUN_OFF_TICKS, exposed } = await import('../src/game/tag');
+  const setup = async () => {
+    const m = await import('../src/game/tag');
     const t = new Tag(() => 0);
     const ps = at({ a: { x: 100, y: 100 }, b: { x: 1000, y: 700 } });
     let n = 1;
     t.update(n, ps);
     while (t.st.ph === 'hide') t.update(++n, ps);
-    for (let i = 0; i <= STILL_TICKS; i++) t.update(++n, ps);
-    const [id, seeAt] = t.st.lz![0]!;
-    expect(id).toBe('b');
-    expect(exposed(t.st, 'b', n)).toBe(false);
-    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(false);
-    while (n < seeAt) t.update(++n, ps);
-    expect(exposed(t.st, 'b', n)).toBe(true);
-    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(true);
-    expect(t.visibleTo('b', n, ps, ps).has('a')).toBe(false);
-    // Running a little and stopping does not help; running long enough does.
+    for (let i = 0; i <= m.STILL_TICKS; i++) t.update(++n, ps);
     let x = 1000;
-    for (let i = 0; i < RUN_OFF_TICKS - 1; i++) {
-      ps.set('b', { x: (x -= 2), y: 700 });
-      t.update(++n, ps);
-      if (i === 10) for (let k = 0; k < 30; k++) t.update(++n, ps);
-    }
+    const run = (k: number) => { for (let i = 0; i < k; i++) { ps.set('b', { x: (x -= 2), y: 700 }); t.update(++n, ps); } };
+    const stand = (k: number) => { for (let i = 0; i < k; i++) t.update(++n, ps); };
+    return { ...m, t, ps, run, stand, n: () => n };
+  };
+
+  it('warns a hider, shows them to "it" on the minimap, and lets them off after running', async () => {
+    const { t, ps, run, stand, n, WARN_TICKS, RUN_OFF_TICKS, exposed } = await setup();
+    expect(t.st.lz![0]![0]).toBe('b');
+    expect(exposed(t.st, 'b')).toBe(false);
+    expect(t.visibleTo('a', n(), ps, ps).has('b')).toBe(false);
+    stand(WARN_TICKS);
+    expect(exposed(t.st, 'b')).toBe(true);
+    expect(t.visibleTo('a', n(), ps, ps).has('b')).toBe(true);
+    expect(t.visibleTo('b', n(), ps, ps).has('a')).toBe(false);
+    // Running a little and stopping does not help; running long enough does.
+    run(10);
+    stand(30);
+    run(RUN_OFF_TICKS - 11);
     expect(t.st.lz).toHaveLength(1);
-    ps.set('b', { x: (x -= 2), y: 700 });
-    t.update(++n, ps);
+    run(1);
     expect(t.st.lz).toEqual([]);
     // "It" itself is never flagged.
     expect(t.st.it).toBe('a');
   });
 
-  it('lets a warned hider off at once if they move before "it" sees them', async () => {
-    const { STILL_TICKS } = await import('../src/game/tag');
-    const t = new Tag(() => 0);
-    const ps = at({ a: { x: 100, y: 100 }, b: { x: 1000, y: 700 } });
-    let n = 1;
-    t.update(n, ps);
-    while (t.st.ph === 'hide') t.update(++n, ps);
-    for (let i = 0; i <= STILL_TICKS; i++) t.update(++n, ps);
-    const seeAt = t.st.lz![0]![1];
-    t.update(++n, ps);
-    ps.set('b', { x: 998, y: 700 });
-    t.update(++n, ps);
+  it('keeps a warned hider hidden while they run, however late they start', async () => {
+    const { t, ps, run, stand, n, WARN_TICKS, RUN_OFF_TICKS, exposed } = await setup();
+    stand(WARN_TICKS - 5);
+    run(RUN_OFF_TICKS - 1);
+    expect(exposed(t.st, 'b')).toBe(false);
+    expect(t.st.lz).toHaveLength(1);
+    // Stopping too early: the rest of the warning runs out, then "it" sees them.
+    stand(4);
+    expect(exposed(t.st, 'b')).toBe(false);
+    stand(1);
+    expect(exposed(t.st, 'b')).toBe(true);
+    expect(t.visibleTo('a', n(), ps, ps).has('b')).toBe(true);
+    run(1);
     expect(t.st.lz).toEqual([]);
-    while (n < seeAt + 5) t.update(++n, ps);
-    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(false);
   });
 });
