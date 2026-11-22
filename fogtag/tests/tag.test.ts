@@ -162,4 +162,21 @@ describe('standing still', () => {
     // "It" itself is never flagged.
     expect(t.st.it).toBe('a');
   });
+
+  it('lets a warned hider off at once if they move before "it" sees them', async () => {
+    const { STILL_TICKS } = await import('../src/game/tag');
+    const t = new Tag(() => 0);
+    const ps = at({ a: { x: 100, y: 100 }, b: { x: 1000, y: 700 } });
+    let n = 1;
+    t.update(n, ps);
+    while (t.st.ph === 'hide') t.update(++n, ps);
+    for (let i = 0; i <= STILL_TICKS; i++) t.update(++n, ps);
+    const seeAt = t.st.lz![0]![1];
+    t.update(++n, ps);
+    ps.set('b', { x: 998, y: 700 });
+    t.update(++n, ps);
+    expect(t.st.lz).toEqual([]);
+    while (n < seeAt + 5) t.update(++n, ps);
+    expect(t.visibleTo('a', n, ps, ps).has('b')).toBe(false);
+  });
 });

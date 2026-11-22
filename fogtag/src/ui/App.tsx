@@ -310,6 +310,40 @@ function GameBanner({ g, n, me, name }: { g: TagState | null; n: number; me: str
   );
 }
 
+type FsDoc = Document & { webkitFullscreenEnabled?: boolean; webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void };
+type FsEl = HTMLElement & { webkitRequestFullscreen?: () => void };
+
+/** Full screen on and off; hidden where the browser cannot do it (iPhone). */
+function FullscreenButton() {
+  const d = document as FsDoc;
+  const [on, setOn] = useState(() => !!(d.fullscreenElement ?? d.webkitFullscreenElement));
+  useEffect(() => {
+    const f = () => setOn(!!(d.fullscreenElement ?? d.webkitFullscreenElement));
+    document.addEventListener('fullscreenchange', f);
+    document.addEventListener('webkitfullscreenchange', f);
+    return () => {
+      document.removeEventListener('fullscreenchange', f);
+      document.removeEventListener('webkitfullscreenchange', f);
+    };
+  }, []);
+  if (!(d.fullscreenEnabled || d.webkitFullscreenEnabled)) return null;
+  const toggle = () => {
+    if (on) {
+      if (d.exitFullscreen) void d.exitFullscreen().catch(() => {});
+      else d.webkitExitFullscreen?.();
+      return;
+    }
+    const el = document.documentElement as FsEl;
+    if (el.requestFullscreen) void el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+    else el.webkitRequestFullscreen?.();
+  };
+  return (
+    <button class="menu-btn fs-btn" title={on ? 'Выйти из полного экрана' : 'Во весь экран'} onClick={toggle}>
+      {on ? '🗗' : '⛶'}
+    </button>
+  );
+}
+
 /** Who was "it" how long this round; the least wins. */
 function Scores({ g, name, me }: { g: TagState; name: (pid: string) => string; me: string }) {
   const rows = [...g.sc].sort((a, b) => a[1] - b[1]);
@@ -373,6 +407,7 @@ function Play({ code }: { code: string }) {
           game?.it === session.o.pid && game.ph === 'chase'
             ? new Set(game.lz?.filter(([pid]) => exposed(game, pid, session.gameN)).map(([pid]) => pid))
             : undefined,
+        touched: game?.tag ? { pid: game.tag[1], key: game.tag[2] } : null,
       });
       // A buzz when warned for standing still.
       const lz = game?.lz?.find(([pid]) => pid === session.o.pid);
@@ -424,6 +459,7 @@ function Play({ code }: { code: string }) {
       <button class="menu-btn" onClick={() => setMenu(!menu)}>
         ☰
       </button>
+      <FullscreenButton />
       {!status && (
         <GameBanner g={info.game} n={info.gameN} me={session.o.pid} name={(pid) => session.presence.get(pid)?.name ?? '?'} />
       )}
@@ -456,7 +492,7 @@ function Play({ code }: { code: string }) {
               <h4>Этот раунд</h4>
               <Scores g={info.game} me={session.o.pid} name={(pid) => session.presence.get(pid)?.name ?? '?'} />
               <p class="muted small">
-                Водящий бегает быстрее. Кого коснулся — тот водит и пару секунд стоит. Видно только то, что рядом и не за стеной; в
+                Водящий бегает быстрее. Кого коснулся — тот водит и пять секунд стоит. Видно только то, что рядом и не за стеной; в
                 кустах — только вплотную. Побеждает тот, кто водил меньше всех.
               </p>
             </>
@@ -531,7 +567,11 @@ function HostPage({ code }: { code: string }) {
       const poses = new Map<string, Pose>();
       for (const [pid, p] of host.sim.players) poses.set(pid, { x: p.x, y: p.y, dir: p.idle < 3 ? p.dir : -1 });
       const g = host.tag.st;
-      r.draw(now, poses, whoFrom(host.presence), { it: g.it, itFrozen: speedOf(g, g.it, host.sim.n) === 0 });
+      r.draw(now, poses, whoFrom(host.presence), {
+        it: g.it,
+        itFrozen: speedOf(g, g.it, host.sim.n) === 0,
+        touched: g.tag ? { pid: g.tag[1], key: g.tag[2] } : null,
+      });
     };
     raf = requestAnimationFrame(loop);
     const t = setInterval(() => setRows(host.rows()), 250);

@@ -69,7 +69,12 @@ export interface DrawOptions {
   fog?: Vec | null;
   /** Shown on the minimap even when out of sight (hiders who stood still too long, for "it"). */
   exposed?: Set<string>;
+  /** The last touch: who was touched, and a key that changes with every touch. */
+  touched?: { pid: string; key: number } | null;
 }
+
+/** How long the burst on a touch lasts, ms. */
+const BURST_MS = 900;
 
 /** A few darker leaves in a bush, the same every frame. */
 function leaves(r: Rect): Vec[] {
@@ -89,6 +94,9 @@ function roundRect(g: CanvasRenderingContext2D, r: Rect, rad: number) {
 /** Draws the world on a canvas that fills its element. */
 export class Renderer {
   private motion = new Map<string, Motion>();
+  /** Key of the last touch seen (undefined before the first frame, so an old touch does not burst). */
+  private touchKey: number | null | undefined;
+  private burst: { pid: string; start: number } | null = null;
   /** Last camera transform: world → CSS px. */
   scale = 1;
   ox = 0;
@@ -182,6 +190,17 @@ export class Renderer {
       g.globalAlpha = 1;
     });
 
+    // a burst on a touch, over the bushes
+    const key = o.touched?.key ?? null;
+    if (this.touchKey !== undefined && key !== null && key !== this.touchKey) this.burst = { pid: o.touched!.pid, start: now };
+    this.touchKey = key;
+    if (this.burst) {
+      const p = poses.get(this.burst.pid);
+      const t = (now - this.burst.start) / BURST_MS;
+      if (t >= 1) this.burst = null;
+      else if (p && (!fog || this.burst.pid === o.me || sees(fog, p))) this.drawBurst(g, p, t);
+    }
+
     if (o.fog) this.fog(g, o.fog);
 
     if (o.minimap) {
@@ -210,6 +229,37 @@ export class Renderer {
     g.closePath();
     g.fillStyle = grad;
     g.fill();
+  }
+
+  /** Rings and rays spreading from whoever was just touched; `t` runs 0..1. */
+  private drawBurst(g: CanvasRenderingContext2D, p: Vec, t: number) {
+    const e = 1 - (1 - t) ** 3;
+    const cy = p.y - 4;
+    g.save();
+    g.globalAlpha = 1 - t;
+    g.lineWidth = 3 * (1 - t) + 1;
+    g.strokeStyle = '#ffe14a';
+    g.beginPath();
+    g.arc(p.x, cy, 8 + 40 * e, 0, Math.PI * 2);
+    g.stroke();
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.arc(p.x, cy, 4 + 26 * e, 0, Math.PI * 2);
+    g.stroke();
+    g.strokeStyle = '#ff8a2a';
+    g.lineWidth = 2.5;
+    g.lineCap = 'round';
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2 + 0.3;
+      const r0 = 12 + 30 * e;
+      const r1 = r0 + 10 * (1 - t);
+      g.beginPath();
+      g.moveTo(p.x + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+      g.lineTo(p.x + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+      g.stroke();
+    }
+    g.restore();
   }
 
   private player(g: CanvasRenderingContext2D, now: number, pid: string, p: Pose, who: Who, me: boolean, role: 'it' | 'frozen' | null) {

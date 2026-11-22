@@ -29,12 +29,12 @@ export const END_TICKS = 8 * TICK_HZ;
 export const FREEZE_TICKS = 5 * TICK_HZ;
 /** A hider standing still this long in the chase is warned... */
 export const STILL_TICKS = 15 * TICK_HZ;
-/** ...and this long after the warning "it" sees them on the minimap... */
+/** ...and this long after the warning "it" sees them on the minimap, unless they move off first... */
 export const WARN_TICKS = 5 * TICK_HZ;
-/** ...until they have been moving this long (in all, since the warning). */
+/** ...until they have been moving this long (in all, since "it" saw them). */
 export const RUN_OFF_TICKS = 5 * TICK_HZ;
-/** Centre to centre: the two boxes touch, plus a little for lag. */
-export const TOUCH = HALF * 2 + 6;
+/** Centre to centre: the two boxes touch, plus a little for lag, half as much again (36 px). */
+export const TOUCH = (HALF * 2 + 6) * 1.5;
 /** Someone just out of sight stays in the snapshots this long, so they do not flicker at the edge. */
 const SEEN_GRACE = 6;
 
@@ -52,7 +52,7 @@ export interface TagState {
   tag: [string, string, number] | null;
   /** In 'wait': who the round waits for (no direct link yet). */
   wt?: string[];
-  /** Hiders who stood still too long: [pid, tick "it" starts to see them on the minimap, ticks run since the warning]. */
+  /** Hiders who stood still too long: [pid, tick "it" starts to see them on the minimap, ticks run since "it" saw them]. */
   lz?: [string, number, number][];
 }
 
@@ -153,7 +153,8 @@ export class Tag {
       const moved = !q || q.x !== p.x || q.y !== p.y;
       const lz = this.lazy.get(id);
       if (lz) {
-        if (moved && ++lz.run >= RUN_OFF_TICKS) {
+        // Moving off before "it" sees them is enough; once seen, they must run a while.
+        if (moved && (n < lz.at || ++lz.run >= RUN_OFF_TICKS)) {
           this.lazy.delete(id);
           this.still.set(id, 0);
         }

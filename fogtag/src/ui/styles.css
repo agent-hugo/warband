@@ -59,6 +59,7 @@ summary { cursor: pointer; color: var(--muted); }
   pointer-events: none; text-shadow: 0 1px 2px #000, 0 0 4px #000; font-size: 13px;
 }
 .menu-btn { position: absolute; top: max(6px, env(safe-area-inset-top)); right: 8px; font-size: 18px; padding: 4px 12px; background: #000a; }
+.fs-btn { right: 60px; }
 .status, .hint {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 18%;
   background: #000b; padding: 8px 14px; border-radius: 10px; pointer-events: none; text-align: center; max-width: 90%;
