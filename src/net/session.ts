@@ -14,6 +14,7 @@ import {
   type UpMsg,
   type Via,
 } from './protocol';
+import { holdMic } from './mic';
 import { Diag, pairsReport, sdpCandidates, type DiagReport } from './diag';
 import { CHANNEL, gathered, iceServers, routeInfo, routeLabel, type RouteInfo, type TurnConfig } from './rtc';
 
@@ -218,6 +219,8 @@ export class Session {
     this.sid = sid;
     this.rtc = 'connecting';
     this.rtcSince = performance.now();
+    const release = await holdMic(d);
+    if (this.pc !== pc) return release();
     dc.onopen = () => {
       if (this.dc !== dc) return;
       this.rtc = 'open';
@@ -248,11 +251,13 @@ export class Session {
     try {
       await pc.setLocalDescription(await pc.createOffer());
       await gathered(pc);
+      release();
       if (this.pc !== pc) return;
       d.r.local = sdpCandidates(pc.localDescription?.sdp);
       d.add(`предложение отправлено хосту, адресов: ${d.r.local.length}`);
       await this.bus.publish(topics.sig(this.o.code, host.id, this.o.pid), { sid, sdp: pc.localDescription!.toJSON() } satisfies SigMsg);
     } catch (e) {
+      release();
       if (this.pc === pc) this.failRtc(10_000, `ошибка: ${String(e)}`);
     }
   }
@@ -267,6 +272,13 @@ export class Session {
     } catch (e) {
       if (this.pc === pc) this.failRtc(10_000, `ответ не принят: ${String(e)}`);
     }
+  }
+
+  /** Starts a new direct link now, e.g. after an option changed. */
+  retryRtc() {
+    if (this.mode !== 'auto') return;
+    this.closeRtc();
+    this.retryAt = 0;
   }
 
   setMode(mode: 'auto' | 'mqtt') {

@@ -5,6 +5,7 @@ import { Host, type PlayerRow } from '../net/host';
 import { COLORS, normalizeRoom, randomRoomCode, type PresenceMsg } from '../net/protocol';
 import { routeLabel } from '../net/rtc';
 import { browserName, diagText, type DiagReport } from '../net/diag';
+import { askMic, reveal } from '../net/mic';
 import { Session, type SessionInfo } from '../net/session';
 import { decodeInvite, inviteHash } from './invite';
 import { Joystick } from './joystick';
@@ -201,6 +202,40 @@ function whoFrom(presence: Map<string, PresenceMsg>) {
 }
 
 /** How the last WebRTC attempt went, with a copy button. */
+/** Option to show the real address to other devices; see net/mic.ts. */
+function RevealCheck({ onChange }: { onChange?: () => void }) {
+  const [, redraw] = useState(0);
+  const [err, setErr] = useState('');
+  return (
+    <>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={reveal.on}
+          onChange={async (e) => {
+            const v = e.currentTarget.checked;
+            setErr('');
+            if (v) {
+              const bad = await askMic();
+              if (bad) {
+                setErr(`Микрофон не дали (${bad}), адрес останется скрытым.`);
+                redraw((x) => x + 1);
+                return;
+              }
+            }
+            reveal.on = v;
+            redraw((x) => x + 1);
+            onChange?.();
+          }}
+        />
+        Показывать свой адрес в сети: для Firefox, если WebRTC не соединяется. Браузер спросит микрофон; он открывается на
+        секунду при соединении, звук никуда не идёт
+      </label>
+      {err && <p class="bad small">{err}</p>}
+    </>
+  );
+}
+
 function DiagBox({ report, title = 'Диагностика WebRTC' }: { report: DiagReport | null; title?: string }) {
   const [copied, setCopied] = useState(false);
   const text = diagText(report);
@@ -334,6 +369,7 @@ function Play({ code }: { code: string }) {
             <input type="checkbox" checked={session.brokerPing} onChange={(e) => ((session.brokerPing = e.currentTarget.checked), redraw((x) => x + 1))} />
             Пинговать брокер раз в секунду и при WebRTC (для сравнения RTT)
           </label>
+          <RevealCheck onChange={() => session.retryRtc()} />
           <p class="muted small">Поправок предсказания: {info.corrections}</p>
           <div class="row">
             <button disabled={info.hosting} onClick={() => void session.becomeHost()}>
@@ -430,6 +466,7 @@ function HostPage({ code }: { code: string }) {
         </table>
         {!rows.length && <p class="muted">Пока никого. Отсканируйте код телефоном:</p>}
         <Invite code={code} />
+        <RevealCheck />
         {rows.map((r) => (host.diags.has(r.pid) ? <DiagBox title={`WebRTC с ${r.name}`} report={host.diags.get(r.pid)!} /> : null))}
         <p>
           <button onClick={() => (location.hash = '')}>На главную</button>

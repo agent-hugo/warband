@@ -14,6 +14,7 @@ import {
   type Via,
 } from './protocol';
 import { Diag, pairsReport, sdpCandidates, type DiagReport } from './diag';
+import { holdMic } from './mic';
 import { gathered, iceServers, routeInfo, type RouteInfo, type TurnConfig } from './rtc';
 
 export interface HostOptions {
@@ -217,15 +218,18 @@ export class Host {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') drop();
     };
+    const release = await holdMic(d);
     try {
       await pc.setRemoteDescription(m.sdp);
       await pc.setLocalDescription(await pc.createAnswer());
       await gathered(pc);
+      release();
       if (this.peers.get(from) !== peer) return;
       d.r.local = sdpCandidates(pc.localDescription?.sdp);
       d.add(`ответ отправлен, адресов: ${d.r.local.length}`);
       await this.bus.publish(topics.sig(this.o.code, from, this.id), { sid: m.sid, sdp: pc.localDescription!.toJSON() } satisfies SigMsg);
     } catch {
+      release();
       drop();
     }
   }

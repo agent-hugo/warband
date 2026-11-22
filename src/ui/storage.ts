@@ -3,7 +3,7 @@ import type { TurnConfig } from '../net/rtc';
 
 export const DEFAULT_BROKER = 'wss://mqtt.flespi.io';
 
-function load(key: string, store: Storage = localStorage): string | null {
+export function load(key: string, store: Storage = localStorage): string | null {
   try {
     return store.getItem(key);
   } catch {
@@ -11,7 +11,7 @@ function load(key: string, store: Storage = localStorage): string | null {
   }
 }
 
-function save(key: string, value: string | null, store: Storage = localStorage): void {
+export function save(key: string, value: string | null, store: Storage = localStorage): void {
   try {
     if (value === null) store.removeItem(key);
     else store.setItem(key, value);
